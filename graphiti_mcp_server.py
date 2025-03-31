@@ -1,0 +1,1226 @@
+#!/usr/bin/env python3
+"""
+Graphiti MCP Server - Exposes Graphiti functionality through the Model Context Protocol (MCP)
+"""
+
+import argparse
+import asyncio
+import logging
+import os
+import signal
+import sys
+import uuid
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any, Optional, TypedDict, Union, cast
+
+from dotenv import load_dotenv
+from graphiti_core import Graphiti
+from graphiti_core.edges import EntityEdge
+from graphiti_core.llm_client import LLMClient
+from graphiti_core.llm_client.config import LLMConfig
+from graphiti_core.llm_client.openai_client import OpenAIClient
+from graphiti_core.nodes import EpisodeType, EpisodicNode
+from graphiti_core.search.search_config_recipes import (
+    NODE_HYBRID_SEARCH_NODE_DISTANCE,
+    NODE_HYBRID_SEARCH_RRF,
+)
+from graphiti_core.search.search_filters import SearchFilters
+from graphiti_core.utils.maintenance.graph_data_operations import clear_data
+from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel, Field
+from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
+
+load_dotenv()
+
+# Initialize Rich console
+console = Console()
+
+
+class OperationPriority(Enum):
+    """Priority levels for operations during shutdown"""
+
+    CRITICAL = "critical"  # Must complete (e.g., Neo4j connection closure)
+    IMPORTANT = "important"  # Should complete if possible (e.g., pending API calls)
+    OPTIONAL = "optional"  # Can be cancelled (e.g., community building)
+
+
+class OperationState(Enum):
+    """Possible states for operations"""
+
+    INITIALIZING = "initializing"
+    RUNNING = "running"
+    WAITING = "waiting"
+    COMPLETING = "completing"
+    CANCELLED = "cancelled"
+    COMPLETED = "completed"
+    ERROR = "error"
+
+
+class Operation:
+    """Represents a tracked operation during shutdown"""
+
+    def __init__(
+        self,
+        name: str,
+        priority: OperationPriority,
+        total_steps: int,
+        dependencies: list[str] | None = None,
+    ):
+        self.name = name
+        self.priority = priority
+        self.state = OperationState.INITIALIZING
+        self.current_step = 0
+        self.total_steps = total_steps
+        self.dependencies = dependencies if dependencies is not None else []
+        self.error: Exception | None = None
+        self.retry_count = 0
+        self.max_retries = 3
+        self.description = ""
+
+    def update(
+        self,
+        step: int | None = None,
+        state: OperationState | None = None,
+        error: Exception | None = None,
+        description: str | None = None,
+    ) -> None:
+        """Update operation status"""
+        if step is not None:
+            self.current_step = step
+        if state is not None:
+            self.state = state
+        if error is not None:
+            self.error = error
+            if self.retry_count < self.max_retries:
+                self.retry_count += 1
+                self.state = OperationState.WAITING
+            else:
+                self.state = OperationState.ERROR
+        if description is not None:
+            self.description = description
+
+
+class ShutdownManager:
+    """Manages graceful shutdown process"""
+
+    def __init__(self):
+        self.operations: dict[str, Operation] = {}
+        self.accepting_new = True
+        self.shutdown_requested = False
+        self._status_task: asyncio.Task | None = None
+        self.status_update_interval = 3.0  # seconds
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        )
+
+    def add_operation(
+        self,
+        name: str,
+        priority: OperationPriority,
+        total_steps: int,
+        dependencies: list[str] | None = None,
+    ) -> str:
+        """Add a new operation to track"""
+        op_id = str(uuid.uuid4())
+        self.operations[op_id] = Operation(name, priority, total_steps, dependencies)
+        return op_id
+
+    async def update_operation(
+        self,
+        op_id: str,
+        step: int | None = None,
+        state: OperationState | None = None,
+        error: Exception | None = None,
+        description: str | None = None,
+    ) -> None:
+        """Update operation status and broadcast"""
+        if op_id in self.operations:
+            self.operations[op_id].update(step, state, error, description)
+            await self.broadcast_status()
+
+    def create_status_table(self) -> Table:
+        """Create Rich table for status display"""
+        table = Table(title="Shutdown Status")
+        table.add_column("Operation")
+        table.add_column("Priority")
+        table.add_column("Status")
+        table.add_column("Progress")
+        table.add_column("Description")
+
+        for op in self.operations.values():
+            progress = f"{op.current_step}/{op.total_steps}"
+            if op.error:
+                status = f"ERROR (Retry {op.retry_count}/{op.max_retries})"
+            else:
+                status = op.state.value
+
+            table.add_row(
+                op.name, op.priority.value, status, progress, op.description or ""
+            )
+
+        return table
+
+    async def broadcast_status(self) -> None:
+        """Display status update in terminal and send via MCP"""
+        # Terminal update using Rich
+        table = self.create_status_table()
+        console.print(table)
+
+        # Log status update
+        logger.info(
+            f"Shutdown status update: {len(self.operations)} operations tracked"
+        )
+        for op in self.operations.values():
+            if op.error:
+                logger.warning(f"Operation '{op.name}' in error state: {op.error}")
+            elif op.state in (OperationState.COMPLETED, OperationState.CANCELLED):
+                logger.info(f"Operation '{op.name}' {op.state.value}")
+            else:
+                logger.info(
+                    f"Operation '{op.name}': {op.current_step}/{op.total_steps} steps complete"
+                )
+
+
+# Create global shutdown manager instance
+shutdown_manager = ShutdownManager()
+
+DEFAULT_LLM_MODEL = "gpt-4o"
+
+
+class Requirement(BaseModel):
+    """A Requirement represents a specific need, feature, or functionality that a product or service must fulfill.
+
+    Always ensure an edge is created between the requirement and the project it belongs to, and clearly indicate on the
+    edge that the requirement is a requirement.
+
+    Instructions for identifying and extracting requirements:
+    1. Look for explicit statements of needs or necessities ("We need X", "X is required", "X must have Y")
+    2. Identify functional specifications that describe what the system should do
+    3. Pay attention to non-functional requirements like performance, security, or usability criteria
+    4. Extract constraints or limitations that must be adhered to
+    5. Focus on clear, specific, and measurable requirements rather than vague wishes
+    6. Capture the priority or importance if mentioned ("critical", "high priority", etc.)
+    7. Include any dependencies between requirements when explicitly stated
+    8. Preserve the original intent and scope of the requirement
+    9. Categorize requirements appropriately based on their domain or function
+    """
+
+    project_name: str = Field(
+        ...,
+        description="The name of the project to which the requirement belongs.",
+    )
+    description: str = Field(
+        ...,
+        description="Description of the requirement. Only use information mentioned in the context to write this description.",
+    )
+
+
+class Preference(BaseModel):
+    """A Preference represents a user's expressed like, dislike, or preference for something.
+
+    Instructions for identifying and extracting preferences:
+    1. Look for explicit statements of preference such as "I like/love/enjoy/prefer X" or "I don't like/hate/dislike X"
+    2. Pay attention to comparative statements ("I prefer X over Y")
+    3. Consider the emotional tone when users mention certain topics
+    4. Extract only preferences that are clearly expressed, not assumptions
+    5. Categorize the preference appropriately based on its domain (food, music, brands, etc.)
+    6. Include relevant qualifiers (e.g., "likes spicy food" rather than just "likes food")
+    7. Only extract preferences directly stated by the user, not preferences of others they mention
+    8. Provide a concise but specific description that captures the nature of the preference
+    """
+
+    category: str = Field(
+        ...,
+        description="The category of the preference. (e.g., 'Brands', 'Food', 'Music')",
+    )
+    description: str = Field(
+        ...,
+        description="Brief description of the preference. Only use information mentioned in the context to write this description.",
+    )
+
+
+class Procedure(BaseModel):
+    """A Procedure informing the agent what actions to take or how to perform in certain scenarios. Procedures are typically composed of several steps.
+
+    Instructions for identifying and extracting procedures:
+    1. Look for sequential instructions or steps ("First do X, then do Y")
+    2. Identify explicit directives or commands ("Always do X when Y happens")
+    3. Pay attention to conditional statements ("If X occurs, then do Y")
+    4. Extract procedures that have clear beginning and end points
+    5. Focus on actionable instructions rather than general information
+    6. Preserve the original sequence and dependencies between steps
+    7. Include any specified conditions or triggers for the procedure
+    8. Capture any stated purpose or goal of the procedure
+    9. Summarize complex procedures while maintaining critical details
+    """
+
+    description: str = Field(
+        ...,
+        description="Brief description of the procedure. Only use information mentioned in the context to write this description.",
+    )
+
+
+ENTITY_TYPES: dict[str, BaseModel] = {
+    "Requirement": Requirement,  # type: ignore
+    "Preference": Preference,  # type: ignore
+    "Procedure": Procedure,  # type: ignore
+}
+
+
+# Type definitions for API responses
+class ErrorResponse(TypedDict):
+    error: str
+
+
+class SuccessResponse(TypedDict):
+    message: str
+
+
+class NodeResult(TypedDict):
+    uuid: str
+    name: str
+    summary: str
+    labels: list[str]
+    group_id: str
+    created_at: str
+    attributes: dict[str, Any]
+
+
+class NodeSearchResponse(TypedDict):
+    message: str
+    nodes: list[NodeResult]
+
+
+class FactSearchResponse(TypedDict):
+    message: str
+    facts: list[dict[str, Any]]
+
+
+class EpisodeSearchResponse(TypedDict):
+    message: str
+    episodes: list[dict[str, Any]]
+
+
+class StatusResponse(TypedDict):
+    status: str
+    message: str
+
+
+# Server configuration classes
+class GraphitiConfig(BaseModel):
+    """Configuration for Graphiti client.
+
+    Centralizes all configuration parameters for the Graphiti client,
+    including database connection details and LLM settings.
+    """
+
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "password"
+    openai_api_key: Optional[str] = None
+    openai_base_url: Optional[str] = None
+    model_name: Optional[str] = None
+    group_id: Optional[str] = None
+    use_custom_entities: bool = False
+
+    @classmethod
+    def from_env(cls) -> "GraphitiConfig":
+        """Create a configuration instance from environment variables."""
+        return cls(
+            neo4j_uri=os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
+            neo4j_user=os.environ.get("NEO4J_USER", "neo4j"),
+            neo4j_password=os.environ.get("NEO4J_PASSWORD", "password"),
+            openai_api_key=os.environ.get("OPENAI_API_KEY"),
+            openai_base_url=os.environ.get("OPENAI_BASE_URL"),
+            model_name=os.environ.get("MODEL_NAME"),
+        )
+
+
+class MCPConfig(BaseModel):
+    """Configuration for MCP server."""
+
+    transport: str
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stderr,
+)
+logger = logging.getLogger(__name__)
+
+# Create global config instance
+config = GraphitiConfig.from_env()
+
+# MCP server instructions
+GRAPHITI_MCP_INSTRUCTIONS = """
+Welcome to Graphiti MCP - a memory service for AI agents built on a knowledge graph. Graphiti performs well
+with dynamic data such as user interactions, changing enterprise data, and external information.
+
+Graphiti transforms information into a richly connected knowledge network, allowing you to 
+capture relationships between concepts, entities, and information. The system organizes data as episodes 
+(content snippets), nodes (entities), and facts (relationships between entities), creating a dynamic, 
+queryable memory store that evolves with new information. Graphiti supports multiple data formats, including 
+structured JSON data, enabling seamless integration with existing data pipelines and systems.
+
+Facts contain temporal metadata, allowing you to track the time of creation and whether a fact is invalid 
+(superseded by new information).
+
+Key capabilities:
+1. Add episodes (text, messages, or JSON) to the knowledge graph with the add_episode tool
+2. Search for nodes (entities) in the graph using natural language queries with search_nodes
+3. Find relevant facts (relationships between entities) with search_facts
+4. Retrieve specific entity edges or episodes by UUID
+5. Manage the knowledge graph with tools like delete_episode, delete_entity_edge, and clear_graph
+
+The server connects to a database for persistent storage and uses language models for certain operations. 
+Each piece of information is organized by group_id, allowing you to maintain separate knowledge domains.
+
+When adding information, provide descriptive names and detailed content to improve search quality. 
+When searching, use specific queries and consider filtering by group_id for more relevant results.
+
+For optimal performance, ensure the database is properly configured and accessible, and valid 
+API keys are provided for any language model operations.
+"""
+
+
+# MCP server instance
+mcp = FastMCP(
+    "graphiti",
+    instructions=GRAPHITI_MCP_INSTRUCTIONS,
+)
+
+
+# Initialize Graphiti client
+graphiti_client: Optional[Graphiti] = None
+
+
+async def initialize_graphiti(
+    llm_client: Optional[LLMClient] = None, destroy_graph: bool = False
+):
+    """Initialize the Graphiti client with the provided settings.
+
+    Args:
+        llm_client: Optional LLMClient instance to use for LLM operations
+        destroy_graph: Optional boolean to destroy all Graphiti graphs
+    """
+    global graphiti_client
+
+    # If no client is provided, create a default OpenAI client
+    if not llm_client:
+        if config.openai_api_key:
+            llm_config = LLMConfig(api_key=config.openai_api_key)
+            if config.openai_base_url:
+                llm_config.base_url = config.openai_base_url
+            if config.model_name:
+                llm_config.model = config.model_name
+            llm_client = OpenAIClient(config=llm_config)
+        else:
+            raise ValueError(
+                "OPENAI_API_KEY must be set when not using a custom LLM client"
+            )
+
+    if not config.neo4j_uri or not config.neo4j_user or not config.neo4j_password:
+        raise ValueError("NEO4J_URI, NEO4J_USER, and NEO4J_PASSWORD must be set")
+
+    graphiti_client = Graphiti(
+        uri=config.neo4j_uri,
+        user=config.neo4j_user,
+        password=config.neo4j_password,
+        llm_client=llm_client,
+    )
+
+    if destroy_graph:
+        logger.info("Destroying graph...")
+        await clear_data(graphiti_client.driver)
+
+    # Initialize the graph database with Graphiti's indices
+    await graphiti_client.build_indices_and_constraints()
+    logger.info("Graphiti client initialized successfully")
+
+
+def format_fact_result(edge: EntityEdge) -> dict[str, Any]:
+    """Format an entity edge into a readable result.
+
+    Since EntityEdge is a Pydantic BaseModel, we can use its built-in serialization capabilities.
+
+    Args:
+        edge: The EntityEdge to format
+
+    Returns:
+        A dictionary representation of the edge with serialized dates and excluded embeddings
+    """
+    return edge.model_dump(
+        mode="json",
+        exclude={
+            "fact_embedding",
+        },
+    )
+
+
+# Dictionary to store queues for each group_id
+# Each queue is a list of tasks to be processed sequentially
+episode_queues: dict[str, asyncio.Queue] = {}
+# Dictionary to track if a worker is running for each group_id
+queue_workers: dict[str, bool] = {}
+
+
+async def process_episode_queue(group_id: str):
+    """Process episodes for a specific group_id sequentially.
+
+    This function runs as a long-lived task that processes episodes
+    from the queue one at a time.
+    """
+    global queue_workers
+
+    logger.info(f"Starting episode queue worker for group_id: {group_id}")
+    queue_workers[group_id] = True
+
+    try:
+        while True:
+            # Get the next episode processing function from the queue
+            # This will wait if the queue is empty
+            process_func = await episode_queues[group_id].get()
+
+            try:
+                # Process the episode
+                await process_func()
+            except Exception as e:
+                logger.error(
+                    f"Error processing queued episode for group_id {group_id}: {str(e)}"
+                )
+            finally:
+                # Mark the task as done regardless of success/failure
+                episode_queues[group_id].task_done()
+    except asyncio.CancelledError:
+        logger.info(f"Episode queue worker for group_id {group_id} was cancelled")
+    except Exception as e:
+        logger.error(
+            f"Unexpected error in queue worker for group_id {group_id}: {str(e)}"
+        )
+    finally:
+        queue_workers[group_id] = False
+        logger.info(f"Stopped episode queue worker for group_id: {group_id}")
+
+
+@mcp.tool()
+async def add_episode(
+    name: str,
+    episode_body: str,
+    group_id: Optional[str] = None,
+    source: str = "text",
+    source_description: str = "",
+    uuid: Optional[str] = None,
+) -> Union[SuccessResponse, ErrorResponse]:
+    """Add an episode to the Graphiti knowledge graph. This is the primary way to add information to the graph.
+
+    This function returns immediately and processes the episode addition in the background.
+    Episodes for the same group_id are processed sequentially to avoid race conditions.
+
+    Args:
+        name (str): Name of the episode
+        episode_body (str): The content of the episode. When source='json', this must be a properly escaped JSON string,
+                           not a raw Python dictionary. The JSON data will be automatically processed
+                           to extract entities and relationships.
+        group_id (str, optional): A unique ID for this graph. If not provided, uses the default group_id from CLI
+                                 or a generated one.
+        source (str, optional): Source type, must be one of:
+                               - 'text': For plain text content (default)
+                               - 'json': For structured data
+                               - 'message': For conversation-style content
+        source_description (str, optional): Description of the source
+        uuid (str, optional): Optional UUID for the episode
+
+    Examples:
+        # Adding plain text content
+        add_episode(
+            name="Company News",
+            episode_body="Acme Corp announced a new product line today.",
+            source="text",
+            source_description="news article",
+            group_id="some_arbitrary_string"
+        )
+
+        # Adding structured JSON data
+        # NOTE: episode_body must be a properly escaped JSON string. Note the triple backslashes
+        add_episode(
+            name="Customer Profile",
+            episode_body="{\\\"company\\\": {\\\"name\\\": \\\"Acme Technologies\\\"}, \\\"products\\\": [{\\\"id\\\": \\\"P001\\\", \\\"name\\\": \\\"CloudSync\\\"}, {\\\"id\\\": \\\"P002\\\", \\\"name\\\": \\\"DataMiner\\\"}]}",
+            source="json",
+            source_description="CRM data"
+        )
+
+        # Adding message-style content
+        add_episode(
+            name="Customer Conversation",
+            episode_body="user: What's your return policy?\nassistant: You can return items within 30 days.",
+            source="message",
+            source_description="chat transcript",
+            group_id="some_arbitrary_string"
+        )
+
+    Notes:
+        When using source='json':
+        - The JSON must be a properly escaped string, not a raw Python dictionary
+        - The JSON will be automatically processed to extract entities and relationships
+        - Complex nested structures are supported (arrays, nested objects, mixed data types), but keep nesting to a minimum
+        - Entities will be created from appropriate JSON properties
+        - Relationships between entities will be established based on the JSON structure
+    """
+    global graphiti_client, episode_queues, queue_workers
+
+    if graphiti_client is None:
+        return {"error": "Graphiti client not initialized"}
+
+    try:
+        # Map string source to EpisodeType enum
+        source_type = EpisodeType.text
+        if source.lower() == "message":
+            source_type = EpisodeType.message
+        elif source.lower() == "json":
+            source_type = EpisodeType.json
+
+        # Use the provided group_id or fall back to the default from config
+        effective_group_id = group_id if group_id is not None else config.group_id
+
+        # Cast group_id to str to satisfy type checker
+        # The Graphiti client expects a str for group_id, not Optional[str]
+        group_id_str = str(effective_group_id) if effective_group_id is not None else ""
+
+        # We've already checked that graphiti_client is not None above
+        # This assert statement helps type checkers understand that graphiti_client is defined
+        assert graphiti_client is not None, "graphiti_client should not be None here"
+
+        # Use cast to help the type checker understand that graphiti_client is not None
+        client = cast(Graphiti, graphiti_client)
+
+        # Define the episode processing function
+        async def process_episode():
+            try:
+                logger.info(
+                    f"Processing queued episode '{name}' for group_id: {group_id_str}"
+                )
+                # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
+                entity_types = ENTITY_TYPES if config.use_custom_entities else {}
+
+                await client.add_episode(
+                    name=name,
+                    episode_body=episode_body,
+                    source=source_type,
+                    source_description=source_description,
+                    group_id=group_id_str,  # Using the string version of group_id
+                    uuid=uuid,
+                    reference_time=datetime.now(timezone.utc),
+                    entity_types=entity_types,
+                )
+                logger.info(f"Episode '{name}' added successfully")
+
+                logger.info(f"Building communities after episode '{name}'")
+                await client.build_communities()
+
+                logger.info(f"Episode '{name}' processed successfully")
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(
+                    f"Error processing episode '{name}' for group_id {group_id_str}: {error_msg}"
+                )
+
+        # Initialize queue for this group_id if it doesn't exist
+        if group_id_str not in episode_queues:
+            episode_queues[group_id_str] = asyncio.Queue()
+
+        # Add the episode processing function to the queue
+        await episode_queues[group_id_str].put(process_episode)
+
+        # Start a worker for this queue if one isn't already running
+        if not queue_workers.get(group_id_str, False):
+            asyncio.create_task(process_episode_queue(group_id_str))
+
+        # Return immediately with a success message
+        return {
+            "message": f"Episode '{name}' queued for processing (position: {episode_queues[group_id_str].qsize()})"
+        }
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error queuing episode task: {error_msg}")
+        return {"error": f"Error queuing episode task: {error_msg}"}
+
+
+@mcp.tool()
+async def search_nodes(
+    query: str,
+    group_ids: Optional[list[str]] = None,
+    max_nodes: int = 10,
+    center_node_uuid: Optional[str] = None,
+    entity: str = "",  # cursor seems to break with None
+) -> Union[NodeSearchResponse, ErrorResponse]:
+    """Search the Graphiti knowledge graph for relevant node summaries.
+    These contain a summary of all of a node's relationships with other nodes.
+
+    Note: entity is a single entity type to filter results (permitted: "Preference", "Procedure").
+
+    Args:
+        query: The search query
+        group_ids: Optional list of group IDs to filter results
+        max_nodes: Maximum number of nodes to return (default: 10)
+        center_node_uuid: Optional UUID of a node to center the search around
+        entity: Optional single entity type to filter results (permitted: "Preference", "Procedure")
+    """
+    global graphiti_client
+
+    if graphiti_client is None:
+        return ErrorResponse(error="Graphiti client not initialized")
+
+    try:
+        # Use the provided group_ids or fall back to the default from config if none provided
+        effective_group_ids = (
+            group_ids
+            if group_ids is not None
+            else [config.group_id]
+            if config.group_id
+            else []
+        )
+
+        # Configure the search
+        if center_node_uuid is not None:
+            search_config = NODE_HYBRID_SEARCH_NODE_DISTANCE.model_copy(deep=True)
+        else:
+            search_config = NODE_HYBRID_SEARCH_RRF.model_copy(deep=True)
+        search_config.limit = max_nodes
+
+        filters = SearchFilters()
+        if entity != "":
+            filters.node_labels = [entity]
+
+        # We've already checked that graphiti_client is not None above
+        assert graphiti_client is not None
+
+        # Use cast to help the type checker understand that graphiti_client is not None
+        client = cast(Graphiti, graphiti_client)
+
+        # Perform the search using the _search method
+        search_results = await client._search(
+            query=query,
+            config=search_config,
+            group_ids=effective_group_ids,
+            center_node_uuid=center_node_uuid,
+            search_filter=filters,
+        )
+
+        if not search_results.nodes:
+            return NodeSearchResponse(message="No relevant nodes found", nodes=[])
+
+        # Format the node results
+        formatted_nodes: list[NodeResult] = [
+            {
+                "uuid": node.uuid,
+                "name": node.name,
+                "summary": node.summary if hasattr(node, "summary") else "",
+                "labels": node.labels if hasattr(node, "labels") else [],
+                "group_id": node.group_id,
+                "created_at": node.created_at.isoformat(),
+                "attributes": node.attributes if hasattr(node, "attributes") else {},
+            }
+            for node in search_results.nodes
+        ]
+
+        return NodeSearchResponse(
+            message="Nodes retrieved successfully", nodes=formatted_nodes
+        )
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error searching nodes: {error_msg}")
+        return ErrorResponse(error=f"Error searching nodes: {error_msg}")
+
+
+@mcp.tool()
+async def search_facts(
+    query: str,
+    group_ids: Optional[list[str]] = None,
+    max_facts: int = 10,
+    center_node_uuid: Optional[str] = None,
+) -> Union[FactSearchResponse, ErrorResponse]:
+    """Search the Graphiti knowledge graph for relevant facts.
+
+    Args:
+        query: The search query
+        group_ids: Optional list of group IDs to filter results
+        max_facts: Maximum number of facts to return (default: 10)
+        center_node_uuid: Optional UUID of a node to center the search around
+    """
+    global graphiti_client
+
+    if graphiti_client is None:
+        return {"error": "Graphiti client not initialized"}
+
+    try:
+        # Use the provided group_ids or fall back to the default from config if none provided
+        effective_group_ids = (
+            group_ids
+            if group_ids is not None
+            else [config.group_id]
+            if config.group_id
+            else []
+        )
+
+        # We've already checked that graphiti_client is not None above
+        assert graphiti_client is not None
+
+        # Use cast to help the type checker understand that graphiti_client is not None
+        client = cast(Graphiti, graphiti_client)
+
+        relevant_edges = await client.search(
+            group_ids=effective_group_ids,
+            query=query,
+            num_results=max_facts,
+            center_node_uuid=center_node_uuid,
+        )
+
+        if not relevant_edges:
+            return {"message": "No relevant facts found", "facts": []}
+
+        facts = [format_fact_result(edge) for edge in relevant_edges]
+        return {"message": "Facts retrieved successfully", "facts": facts}
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error searching facts: {error_msg}")
+        return {"error": f"Error searching facts: {error_msg}"}
+
+
+@mcp.tool()
+async def delete_entity_edge(uuid: str) -> Union[SuccessResponse, ErrorResponse]:
+    """Delete an entity edge from the Graphiti knowledge graph.
+
+    Args:
+        uuid: UUID of the entity edge to delete
+    """
+    global graphiti_client
+
+    if graphiti_client is None:
+        return {"error": "Graphiti client not initialized"}
+
+    try:
+        # We've already checked that graphiti_client is not None above
+        assert graphiti_client is not None
+
+        # Use cast to help the type checker understand that graphiti_client is not None
+        client = cast(Graphiti, graphiti_client)
+
+        # Get the entity edge by UUID
+        entity_edge = await EntityEdge.get_by_uuid(client.driver, uuid)
+        # Delete the edge using its delete method
+        await entity_edge.delete(client.driver)
+        return {"message": f"Entity edge with UUID {uuid} deleted successfully"}
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error deleting entity edge: {error_msg}")
+        return {"error": f"Error deleting entity edge: {error_msg}"}
+
+
+@mcp.tool()
+async def delete_episode(uuid: str) -> Union[SuccessResponse, ErrorResponse]:
+    """Delete an episode from the Graphiti knowledge graph.
+
+    Args:
+        uuid: UUID of the episode to delete
+    """
+    global graphiti_client
+
+    if graphiti_client is None:
+        return {"error": "Graphiti client not initialized"}
+
+    try:
+        # We've already checked that graphiti_client is not None above
+        assert graphiti_client is not None
+
+        # Use cast to help the type checker understand that graphiti_client is not None
+        client = cast(Graphiti, graphiti_client)
+
+        # Get the episodic node by UUID - EpisodicNode is already imported at the top
+        episodic_node = await EpisodicNode.get_by_uuid(client.driver, uuid)
+        # Delete the node using its delete method
+        await episodic_node.delete(client.driver)
+        return {"message": f"Episode with UUID {uuid} deleted successfully"}
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error deleting episode: {error_msg}")
+        return {"error": f"Error deleting episode: {error_msg}"}
+
+
+@mcp.tool()
+async def get_entity_edge(uuid: str) -> Union[dict[str, Any], ErrorResponse]:
+    """Get an entity edge from the Graphiti knowledge graph by its UUID.
+
+    Args:
+        uuid: UUID of the entity edge to retrieve
+    """
+    global graphiti_client
+
+    if graphiti_client is None:
+        return {"error": "Graphiti client not initialized"}
+
+    try:
+        # We've already checked that graphiti_client is not None above
+        assert graphiti_client is not None
+
+        # Use cast to help the type checker understand that graphiti_client is not None
+        client = cast(Graphiti, graphiti_client)
+
+        # Get the entity edge directly using the EntityEdge class method
+        entity_edge = await EntityEdge.get_by_uuid(client.driver, uuid)
+
+        # Use the format_fact_result function to serialize the edge
+        # Return the Python dict directly - MCP will handle serialization
+        return format_fact_result(entity_edge)
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error getting entity edge: {error_msg}")
+        return {"error": f"Error getting entity edge: {error_msg}"}
+
+
+@mcp.tool()
+async def get_episodes(
+    group_id: Optional[str] = None, last_n: int = 10
+) -> Union[list[dict[str, Any]], EpisodeSearchResponse, ErrorResponse]:
+    """Get the most recent episodes for a specific group.
+
+    Args:
+        group_id: ID of the group to retrieve episodes from. If not provided, uses the default group_id.
+        last_n: Number of most recent episodes to retrieve (default: 10)
+    """
+    global graphiti_client
+
+    if graphiti_client is None:
+        return {"error": "Graphiti client not initialized"}
+
+    try:
+        # Use the provided group_id or fall back to the default from config
+        effective_group_id = group_id if group_id is not None else config.group_id
+
+        if not isinstance(effective_group_id, str):
+            return {"error": "Group ID must be a string"}
+
+        # We've already checked that graphiti_client is not None above
+        assert graphiti_client is not None
+
+        # Use cast to help the type checker understand that graphiti_client is not None
+        client = cast(Graphiti, graphiti_client)
+
+        episodes = await client.retrieve_episodes(
+            group_ids=[effective_group_id],
+            last_n=last_n,
+            reference_time=datetime.now(timezone.utc),
+        )
+
+        if not episodes:
+            return {
+                "message": f"No episodes found for group {effective_group_id}",
+                "episodes": [],
+            }
+
+        # Use Pydantic's model_dump method for EpisodicNode serialization
+        formatted_episodes = [
+            # Use mode='json' to handle datetime serialization
+            episode.model_dump(mode="json")
+            for episode in episodes
+        ]
+
+        # Return the Python list directly - MCP will handle serialization
+        return formatted_episodes
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error getting episodes: {error_msg}")
+        return {"error": f"Error getting episodes: {error_msg}"}
+
+
+@mcp.tool()
+async def clear_graph() -> Union[SuccessResponse, ErrorResponse]:
+    """Clear all data from the Graphiti knowledge graph and rebuild indices."""
+    global graphiti_client
+
+    if graphiti_client is None:
+        return {"error": "Graphiti client not initialized"}
+
+    try:
+        # We've already checked that graphiti_client is not None above
+        assert graphiti_client is not None
+
+        # Use cast to help the type checker understand that graphiti_client is not None
+        client = cast(Graphiti, graphiti_client)
+
+        # clear_data is already imported at the top
+        await clear_data(client.driver)
+        await client.build_indices_and_constraints()
+        return {"message": "Graph cleared successfully and indices rebuilt"}
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error clearing graph: {error_msg}")
+        return {"error": f"Error clearing graph: {error_msg}"}
+
+
+@mcp.resource("http://graphiti/status")
+async def get_status() -> StatusResponse:
+    """Get the status of the Graphiti MCP server and Neo4j connection."""
+    global graphiti_client
+
+    if graphiti_client is None:
+        return {"status": "error", "message": "Graphiti client not initialized"}
+
+    try:
+        # We've already checked that graphiti_client is not None above
+        assert graphiti_client is not None
+
+        # Use cast to help the type checker understand that graphiti_client is not None
+        client = cast(Graphiti, graphiti_client)
+
+        # Test Neo4j connection
+        await client.driver.verify_connectivity()
+        return {
+            "status": "ok",
+            "message": "Graphiti MCP server is running and connected to Neo4j",
+        }
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Error checking Neo4j connection: {error_msg}")
+        return {
+            "status": "error",
+            "message": f"Graphiti MCP server is running but Neo4j connection failed: {error_msg}",
+        }
+
+
+@mcp.resource("http://graphiti/shutdown_status")
+async def get_shutdown_status() -> dict[str, Any]:
+    """Get current shutdown status"""
+    global shutdown_manager
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "shutdown_requested": shutdown_manager.shutdown_requested,
+        "accepting_new": shutdown_manager.accepting_new,
+        "operations": {
+            op_id: {
+                "name": op.name,
+                "priority": op.priority.value,
+                "state": op.state.value,
+                "progress": f"{op.current_step}/{op.total_steps}",
+                "description": op.description,
+                "error": str(op.error) if op.error else None,
+                "retry_count": op.retry_count,
+            }
+            for op_id, op in shutdown_manager.operations.items()
+        },
+    }
+
+
+def create_llm_client(
+    api_key: Optional[str] = None, model: Optional[str] = None
+) -> LLMClient:
+    """Create an OpenAI LLM client.
+
+    Args:
+        api_key: API key for the OpenAI service
+        model: Model name to use
+
+    Returns:
+        An instance of the OpenAI LLM client
+    """
+    # Create config with provided API key and model
+    llm_config = LLMConfig(api_key=api_key)
+
+    # Set model if provided
+    if model:
+        llm_config.model = model
+
+    # Create and return the client
+    return OpenAIClient(config=llm_config)
+
+
+async def initialize_server() -> MCPConfig:
+    """Initialize the Graphiti server with the specified LLM client."""
+    global config
+
+    parser = argparse.ArgumentParser(
+        description="Run the Graphiti MCP server with optional LLM client"
+    )
+    parser.add_argument(
+        "--group-id",
+        help="Namespace for the graph. This is an arbitrary string used to organize related data. "
+        "If not provided, a random UUID will be generated.",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["sse", "stdio"],
+        default="sse",
+        help="Transport to use for communication with the client. (default: sse)",
+    )
+    # OpenAI is the only supported LLM client
+    parser.add_argument("--model", help="Model name to use with the LLM client")
+    parser.add_argument(
+        "--destroy-graph", action="store_true", help="Destroy all Graphiti graphs"
+    )
+    parser.add_argument(
+        "--use-custom-entities",
+        action="store_true",
+        help="Enable entity extraction using the predefined ENTITY_TYPES",
+    )
+
+    args = parser.parse_args()
+
+    # Set the group_id from CLI argument or generate a random one
+    if args.group_id:
+        config.group_id = args.group_id
+        logger.info(f"Using provided group_id: {config.group_id}")
+    else:
+        config.group_id = f"graph_{uuid.uuid4().hex[:8]}"
+        logger.info(f"Generated random group_id: {config.group_id}")
+
+    # Set use_custom_entities flag if specified
+    if args.use_custom_entities:
+        config.use_custom_entities = True
+        logger.info("Entity extraction enabled using predefined ENTITY_TYPES")
+    else:
+        logger.info("Entity extraction disabled (no custom entities will be used)")
+
+    llm_client = None
+
+    # Create OpenAI client if model is specified or if OPENAI_API_KEY is available
+    if args.model or config.openai_api_key:
+        # Override model from command line if specified
+
+        config.model_name = args.model or DEFAULT_LLM_MODEL
+
+        # Create the OpenAI client
+        llm_client = create_llm_client(
+            api_key=config.openai_api_key, model=config.model_name
+        )
+
+    # Initialize Graphiti with the specified LLM client
+    await initialize_graphiti(llm_client, destroy_graph=args.destroy_graph)
+
+    return MCPConfig(transport=args.transport)
+
+
+async def run_mcp_server():
+    """Run the MCP server in the current event loop."""
+    # Initialize the server
+    mcp_config = await initialize_server()
+
+    # Set up signal handlers for graceful shutdown
+    loop = asyncio.get_event_loop()
+
+    async def shutdown(sig: signal.Signals) -> None:
+        """Handle graceful shutdown"""
+        global shutdown_manager
+
+        # Stop accepting new operations
+        shutdown_manager.accepting_new = False
+        shutdown_manager.shutdown_requested = True
+
+        # Add Neo4j cleanup operation
+        neo4j_cleanup = shutdown_manager.add_operation(
+            "Neo4j Connection Cleanup", OperationPriority.CRITICAL, total_steps=2
+        )
+
+        # Add API operations cleanup
+        api_cleanup = shutdown_manager.add_operation(
+            "API Operations Cleanup", OperationPriority.IMPORTANT, total_steps=3
+        )
+
+        try:
+            # Update Neo4j cleanup progress
+            await shutdown_manager.update_operation(
+                neo4j_cleanup,
+                step=1,
+                state=OperationState.RUNNING,
+                description="Closing Neo4j connection...",
+            )
+
+            if graphiti_client and graphiti_client.driver:
+                await graphiti_client.driver.close()
+
+            await shutdown_manager.update_operation(
+                neo4j_cleanup,
+                step=2,
+                state=OperationState.COMPLETED,
+                description="Neo4j connection closed",
+            )
+
+            # Handle API operations
+            await shutdown_manager.update_operation(
+                api_cleanup,
+                step=1,
+                state=OperationState.RUNNING,
+                description="Cancelling pending API calls...",
+            )
+
+            # Cancel all pending tasks except shutdown tasks
+            tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+            await shutdown_manager.update_operation(
+                api_cleanup, step=2, description=f"Cancelling {len(tasks)} tasks..."
+            )
+
+            for task in tasks:
+                task.cancel()
+
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            await shutdown_manager.update_operation(
+                api_cleanup,
+                step=3,
+                state=OperationState.COMPLETED,
+                description="All tasks cancelled",
+            )
+
+        except Exception as e:
+            logger.error(f"Error during shutdown: {str(e)}")
+            if neo4j_cleanup in shutdown_manager.operations:
+                await shutdown_manager.update_operation(
+                    neo4j_cleanup, state=OperationState.ERROR, error=e
+                )
+            if api_cleanup in shutdown_manager.operations:
+                await shutdown_manager.update_operation(
+                    api_cleanup, state=OperationState.ERROR, error=e
+                )
+        finally:
+            # Final status update
+            await shutdown_manager.broadcast_status()
+            # Stop the event loop
+            loop.stop()
+
+    # Add signal handlers
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(shutdown(s)))
+
+    # Run the server with the specified transport
+    logger.info(f"Starting MCP server with transport: {mcp_config.transport}")
+    if mcp_config.transport == "stdio":
+        await mcp.run_stdio_async()
+    elif mcp_config.transport == "sse":
+        logger.info(
+            f"Running MCP server with SSE transport on {mcp.settings.host}:{mcp.settings.port}"
+        )
+        await mcp.run_sse_async()
+
+
+def main():
+    """Main function to run the Graphiti MCP server."""
+    try:
+        # Run everything in a single event loop
+        asyncio.run(run_mcp_server())
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt")
+    except Exception as e:
+        logger.error(f"Error running Graphiti MCP server: {str(e)}")
+        raise
+    finally:
+        logger.info("Graphiti MCP server shutdown complete")
+
+
+if __name__ == "__main__":
+    main()
