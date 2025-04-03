@@ -1,4 +1,4 @@
-# Instructions for Using Graphiti's MCP Tools for Agent Memory
+# Instructions for MemCP IDE Agent Memory
 
 ## Configuration and Setup
 
@@ -11,7 +11,7 @@ At the start of each conversation, offer to configure these parameters. Present 
 1. **Memory Operations**:
 
     - `MEMORY_SEARCH_FREQUENCY`:
-        - Default: `EVERY_TURN` (search before each response)
+        - Default: `EVERY_TURN` (search before each response and before any memory saving to see what should be updated)
         - Options: `TOPIC_CHANGE`, `ON_DEMAND`
     - `MEMORY_UPDATE_FREQUENCY`:
         - Default: `IMMEDIATE` (store new information right away)
