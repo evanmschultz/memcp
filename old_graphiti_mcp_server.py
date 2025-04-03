@@ -1,16 +1,36 @@
 #!/usr/bin/env python3
 """Graphiti MCP Server - Exposes Graphiti functionality through the Model Context Protocol (MCP)."""
 
+from memcp.config.settings import GraphitiConfig, MCPConfig
+from memcp.memcp_typings import MEMCP_ENTITIES
+from memcp.models.responses import (
+    EpisodeSearchResponse,
+    ErrorResponse,
+    FactSearchResponse,
+    NodeResult,
+    NodeSearchResponse,
+    StatusResponse,
+    SuccessResponse,
+)
+from queue_adapter import QueueProgressDisplayCompat as QueueProgressDisplay
+
+# Import the queue-related classes from our adapter instead of directly
+# from queue_progress_display import QueueProgressDisplay
+# from queue_stats import QueueStatsTracker
+from queue_adapter import QueueStatsTrackerCompat as QueueStatsTracker
+
 import argparse
 import asyncio
+import atexit
 import contextlib
 import logging
 import os
 import signal
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, TypedDict, cast
+from typing import Any, cast
 
 from dotenv import load_dotenv
 from graphiti_core import Graphiti
@@ -26,240 +46,105 @@ from graphiti_core.search.search_config_recipes import (
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from rich import box
-from rich.console import Console
+from rich.console import Console, Group
+from rich.highlighter import ReprHighlighter
+from rich.live import Live
 from rich.logging import RichHandler
 from rich.panel import Panel
+from rich.status import Status
 from rich.table import Table
+from rich.text import Text
+from rich.theme import Theme
 from rich.traceback import install as install_rich_traceback
 
+# Custom theme for our console
+GRAPHITI_THEME = Theme(
+    {
+        "info": "dim cyan",
+        "warning": "yellow",
+        "danger": "bold red",
+        "success": "bold green",
+        "shutdown": "bold blue",
+        "task": "dim magenta",
+        "highlight": "bold cyan",
+        "normal": "white",
+        "step.success": "green",
+        "step.warning": "yellow",
+    }
+)
+
 # Install rich traceback handler with custom filters to hide CancelledError
-install_rich_traceback(show_locals=False, suppress=["asyncio.exceptions.CancelledError"])
+install_rich_traceback(
+    show_locals=False,
+    suppress=["asyncio.exceptions.CancelledError"],
+)
 
 load_dotenv()
 
-# Initialize Rich consoles - one for main output and one for shutdown process
-console = Console()
-# Use a dedicated console for shutdown to avoid mixing with other output
-shutdown_console = Console(stderr=True)
+# Initialize Rich consoles with our custom theme
+console = Console(theme=GRAPHITI_THEME)
+shutdown_console = Console(stderr=True, theme=GRAPHITI_THEME)
+progress_console = Console(theme=GRAPHITI_THEME)  # New console for progress display
+
+# Create global instances for queue tracking and display
+queue_stats_tracker = QueueStatsTracker()
+queue_progress_display = None  # Will be initialized in the run_mcp_server function
+
+# Set up a global variable to track if we're shutting down
+_original_excepthook = sys.excepthook
+_shutdown_mode = "NONE"  # Can be "NONE", "GRACEFUL", or "FORCE"
 
 
-class Requirement(BaseModel):
-    """A Requirement represents a specific need, feature, or functionality that a product or
-    service must fulfill.
+# Create a custom excepthook that will intercept unhandled exceptions
+def custom_excepthook(exc_type, exc_value, exc_traceback) -> None:
+    """Custom excepthook that intercepts unhandled exceptions and shows a final message."""
+    # First, call the original excepthook to show the traceback
+    _original_excepthook(exc_type, exc_value, exc_traceback)
 
-    Always ensure an edge is created between the requirement and the project it belongs to,
-    and clearly indicate on the edge that the requirement is a requirement.
-
-    Instructions for identifying and extracting requirements:
-    1. Look for explicit statements of needs or necessities ("We need X", "X is required",
-    "X must have Y")
-    2. Identify functional specifications that describe what the system should do
-    3. Pay attention to non-functional requirements like performance, security, or usability
-    criteria
-    4. Extract constraints or limitations that must be adhered to
-    5. Focus on clear, specific, and measurable requirements rather than vague wishes
-    6. Capture the priority or importance if mentioned ("critical", "high priority", etc.)
-    7. Include any dependencies between requirements when explicitly stated
-    8. Preserve the original intent and scope of the requirement
-    9. Categorize requirements appropriately based on their domain or function
-    """
-
-    project_name: str = Field(
-        ...,
-        description="The name of the project to which the requirement belongs.",
-    )
-    description: str = Field(
-        ...,
-        description="Description of the requirement. Only use information mentioned "
-        "in the context to write this description.",
-    )
+    # If this is a shutdown-related exception, show our final message
+    if _shutdown_mode != "NONE" and issubclass(exc_type, asyncio.CancelledError):
+        # Wait a moment to ensure traceback is fully printed
+        time.sleep(0.1)
+        show_final_message()
 
 
-class Preference(BaseModel):
-    """A Preference represents a user's expressed like, dislike, or preference for something.
-
-    Instructions for identifying and extracting preferences:
-    1. Look for explicit statements of preference such as "I like/love/enjoy/prefer X"
-    or "I don't like/hate/dislike X"
-    2. Pay attention to comparative statements ("I prefer X over Y")
-    3. Consider the emotional tone when users mention certain topics
-    4. Extract only preferences that are clearly expressed, not assumptions
-    5. Categorize the preference appropriately based on its domain (food, music, brands, etc.)
-    6. Include relevant qualifiers (e.g., "likes spicy food" rather than just "likes food")
-    7. Only extract preferences directly stated by the user, not preferences of others they mention
-    8. Provide a concise but specific description that captures the nature of the preference
-    """
-
-    category: str = Field(
-        ...,
-        description="The category of the preference. (e.g., 'Brands', 'Food', 'Music')",
-    )
-    description: str = Field(
-        ...,
-        description="Brief description of the preference. Only use information mentioned "
-        "in the context to write this description.",
-    )
+# Register our custom excepthook
+sys.excepthook = custom_excepthook
 
 
-class Procedure(BaseModel):
-    """A Procedure informing the agent what actions to take or how to perform in certain scenarios.
-    Procedures are typically composed of several steps.
-
-    Instructions for identifying and extracting procedures:
-    1. Look for sequential instructions or steps ("First do X, then do Y")
-    2. Identify explicit directives or commands ("Always do X when Y happens")
-    3. Pay attention to conditional statements ("If X occurs, then do Y")
-    4. Extract procedures that have clear beginning and end points
-    5. Focus on actionable instructions rather than general information
-    6. Preserve the original sequence and dependencies between steps
-    7. Include any specified conditions or triggers for the procedure
-    8. Capture any stated purpose or goal of the procedure
-    9. Summarize complex procedures while maintaining critical details
-    """
-
-    description: str = Field(
-        ...,
-        description="Brief description of the procedure. Only use information mentioned "
-        "in the context to write this description.",
-    )
-
-
-class MemCPEntities:
-    """Container for MemCP entity types, used to enforce type safety when adding entities.
-
-    EntityTypes:
-        - Requirement
-        - Preference
-        - Procedure
-    """
-
-    Requirement = Requirement
-    Preference = Preference
-    Procedure = Procedure
-
-    @classmethod
-    def as_dict(cls) -> dict[str, type[BaseModel]]:
-        """Get entities as a dictionary.
-
-        Returns:
-            dict[str, type[BaseModel]]: A dictionary of entity types
-
-        Examples:
-            ```Python
-            MemCPEntities.as_dict()
-            {
-                "Requirement": Requirement,
-                "Preference": Preference,
-                "Procedure": Procedure,
-            }
-            ```
-        """
-        return {
-            "Requirement": Requirement,
-            "Preference": Preference,
-            "Procedure": Procedure,
-        }
-
-
-MEMCP_ENTITIES: dict[str, type[BaseModel]] = MemCPEntities.as_dict()
-
-
-# Type definitions for API responses
-class ErrorResponse(TypedDict):
-    """Represents an error response from the MCP server."""
-
-    error: str
-
-
-class SuccessResponse(TypedDict):
-    """Represents a successful response from the MCP server."""
-
-    message: str
-
-
-class NodeResult(TypedDict):
-    """Represents a node result from the MCP server."""
-
-    uuid: str
-    name: str
-    summary: str
-    labels: list[str]
-    group_id: str
-    created_at: str
-    attributes: dict[str, Any]
-
-
-class NodeSearchResponse(TypedDict):
-    """Represents a node search response from the MCP server."""
-
-    message: str
-    nodes: list[NodeResult]
-
-
-class FactSearchResponse(TypedDict):
-    """Represents a fact search response from the MCP server."""
-
-    message: str
-    facts: list[dict[str, Any]]
-
-
-class EpisodeSearchResponse(TypedDict):
-    """Represents an episode search response from the MCP server."""
-
-    message: str
-    episodes: list[dict[str, Any]]
-
-
-class StatusResponse(TypedDict):
-    """Represents a status response from the MCP server."""
-
-    status: str
-    message: str
-
-
-# Server configuration classes
-class GraphitiConfig(BaseModel):
-    """Configuration for Graphiti client.
-
-    Centralizes all configuration parameters for the Graphiti client,
-    including database connection details and LLM settings.
-    """
-
-    neo4j_uri: str = "bolt://localhost:7687"
-    neo4j_user: str = "neo4j"
-    neo4j_password: str
-    openai_api_key: str | None = None
-    openai_base_url: str | None = None
-    model_name: str | None = None
-    graph_id: str | None = None
-    use_custom_entities: bool = False
-
-    @classmethod
-    def from_env(cls) -> "GraphitiConfig":
-        """Create a configuration instance from environment variables."""
-        neo4j_password = os.environ.get("NEO4J_PASSWORD")
-        if not neo4j_password:
-            raise ValueError("NEO4J_PASSWORD must be set")
-
-        return cls(
-            neo4j_uri=os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
-            neo4j_user=os.environ.get("NEO4J_USER", "neo4j"),
-            neo4j_password=neo4j_password,
-            openai_api_key=os.environ.get("OPENAI_API_KEY"),
-            openai_base_url=os.environ.get("OPENAI_BASE_URL"),
-            model_name=os.environ.get("MODEL_NAME"),
+def show_final_message() -> None:
+    """Display a final reassuring message after all tracebacks."""
+    print("\n\n" + "-" * 80)
+    if _shutdown_mode == "GRACEFUL":
+        shutdown_console.print(
+            "[bold green]✅ GRAPHITI SERVER SHUTDOWN SUCCESSFULLY[/bold green]\n"
         )
+        shutdown_console.print(
+            "\n[info]The asyncio CancelledError tracebacks above are normal and expected "
+            "during shutdown.[/info]"
+        )
+        shutdown_console.print(
+            "\n[info]All tasks were properly cancelled and resources were released "
+            "cleanly.[/info]\n"
+        )
+    elif _shutdown_mode == "FORCE":
+        shutdown_console.print("[bold red]⚠️ GRAPHITI SERVER FORCE KILLED[/bold red]\n")
+        shutdown_console.print(
+            "\n[dim warning]No cleanup was performed. Some resources may not have been properly "
+            "released.[/dim warning]"
+        )
+    else:
+        shutdown_console.print("[bold green]GRAPHITI SERVER SHUTDOWN COMPLETE[/bold green]\n")
+    print("-" * 80 + "\n")
 
 
-class MCPConfig(BaseModel):
-    """Configuration for MCP server."""
-
-    transport: str
+# Register an atexit handler that will show our message as the very last thing
+atexit.register(show_final_message)
 
 
-# Configure logging with Rich to minimize noise
+# Configure logging with Rich to minimize noise and add colors
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
@@ -272,6 +157,7 @@ logging.basicConfig(
             show_time=False,
             show_path=False,
             enable_link_path=False,  # Disable clickable file paths
+            highlighter=ReprHighlighter(),
         )
     ],
 )
@@ -319,6 +205,7 @@ API keys are provided for any language model operations.
 mcp = FastMCP(
     "graphiti",
     instructions=GRAPHITI_MCP_INSTRUCTIONS,
+    settings={"host": "0.0.0.0", "port": 8000},
 )
 
 
@@ -400,14 +287,14 @@ async def process_episode_queue(group_id: str) -> None:
     This function runs as a long-lived task that processes episodes
     from the queue one at a time.
     """
-    global queue_workers
+    global queue_workers, queue_stats_tracker, queue_progress_display
 
     # Name the task to be able to identify it during shutdown
     current_task = asyncio.current_task()
     if current_task:
         current_task.set_name(f"queue_worker_{group_id}")
 
-    logger.info(f"Starting episode queue worker for group_id: {group_id}")
+    logger.info(f"Starting episode queue worker for group_id: [highlight]{group_id}[/highlight]")
     queue_workers[group_id] = True
 
     try:
@@ -416,21 +303,49 @@ async def process_episode_queue(group_id: str) -> None:
             # This will wait if the queue is empty
             process_func = await episode_queues[group_id].get()
 
+            # Generate a unique task ID for tracking
+            task_id = str(uuid.uuid4())
+
             try:
+                # Record that processing has started
+                queue_stats_tracker.start_processing(group_id, task_id)
+
+                # Update the progress display
+                if queue_progress_display:
+                    queue_progress_display.update()
+
                 # Process the episode
                 await process_func()
+
+                # Record successful completion
+                queue_stats_tracker.complete_task(group_id, task_id, success=True)
             except Exception as e:
-                logger.error(f"Error processing queued episode for group_id {group_id}: {str(e)}")
+                # Record failed completion
+                queue_stats_tracker.complete_task(group_id, task_id, success=False)
+
+                logger.error(
+                    f"Error processing queued episode for group_id [highlight]{group_id}[/highlight]: [danger]{str(e)}[/danger]"
+                )
             finally:
                 # Mark the task as done regardless of success/failure
                 episode_queues[group_id].task_done()
+
+                # Update the progress display
+                if queue_progress_display:
+                    queue_progress_display.update()
     except asyncio.CancelledError:
-        logger.info(f"Episode queue worker for group_id {group_id} was cancelled")
+        logger.info(
+            f"Episode queue worker for group_id [highlight]{group_id}[/highlight] was [success]cancelled[/success]"
+        )
     except Exception as e:
-        logger.error(f"Unexpected error in queue worker for group_id {group_id}: {str(e)}")
+        logger.error(
+            f"Unexpected error in queue worker for group_id [highlight]{group_id}[/highlight]: [danger]{str(e)}[/danger]"
+        )
     finally:
         queue_workers[group_id] = False
-        logger.info(f"Stopped episode queue worker for group_id: {group_id}")
+        logger.info(
+            f"[success]Stopped[/success] episode queue worker for group_id: [highlight]{group_id}[/highlight]"
+        )
 
 
 @mcp.tool()
@@ -497,7 +412,12 @@ async def add_episode(
         - Entities will be created from appropriate JSON properties
         - Relationships between entities will be established based on the JSON structure
     """  # noqa: E501
-    global graphiti_client, episode_queues, queue_workers
+    global \
+        graphiti_client, \
+        episode_queues, \
+        queue_workers, \
+        queue_stats_tracker, \
+        queue_progress_display
 
     if graphiti_client is None:
         return {"error": "Graphiti client not initialized"}
@@ -522,7 +442,9 @@ async def add_episode(
         # Define the episode processing function
         async def process_episode() -> None:
             try:
-                logger.info(f"Processing queued episode '{name}' for graph_id: {graph_id_str}")
+                logger.info(
+                    f"Processing queued episode '[highlight]{name}[/highlight]' for graph_id: [highlight]{graph_id_str}[/highlight]"
+                )
                 # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
                 entity_types = MEMCP_ENTITIES if config.use_custom_entities else {}
 
@@ -538,21 +460,32 @@ async def add_episode(
                     reference_time=datetime.now(timezone.utc),
                     entity_types=cast("dict[str, BaseModel]", entity_types),
                 )
-                logger.info(f"Episode '{name}' added successfully")
+                logger.info(
+                    f"Episode '[highlight]{name}[/highlight]' [success]added successfully[/success]"
+                )
 
-                logger.info(f"Building communities after episode '{name}'")
+                logger.info(f"Building communities after episode '[highlight]{name}[/highlight]'")
                 await client.build_communities()
 
-                logger.info(f"Episode '{name}' processed successfully")
+                logger.info(
+                    f"Episode '[highlight]{name}[/highlight]' [success]processed successfully[/success]"
+                )
             except Exception as e:
                 error_msg = str(e)
                 logger.error(
-                    f"Error processing episode '{name}' for graph_id {graph_id_str}: {error_msg}"
+                    f"[danger]Error[/danger] processing episode '[highlight]{name}[/highlight]' for graph_id [highlight]{graph_id_str}[/highlight]: [danger]{error_msg}[/danger]"
                 )
 
         # Initialize queue for this graph_id if it doesn't exist
         if graph_id_str not in episode_queues:
             episode_queues[graph_id_str] = asyncio.Queue()
+
+        # Track the new task in our stats tracker
+        queue_stats_tracker.add_task(graph_id_str)
+
+        # Update the progress display immediately
+        if queue_progress_display:
+            queue_progress_display.update()
 
         # Add the episode processing function to the queue
         await episode_queues[graph_id_str].put(process_episode)
@@ -563,12 +496,11 @@ async def add_episode(
 
         # Return immediately with a success message
         return {
-            "message": f"Episode '{name}' queued for processing (position: "
-            f"{episode_queues[graph_id_str].qsize()})"
+            "message": f"Episode '[highlight]{name}[/highlight]' queued for processing (position: [highlight]{episode_queues[graph_id_str].qsize()}[/highlight])"
         }
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"Error queuing episode task: {error_msg}")
+        logger.error(f"[danger]Error queuing episode task[/danger]: {error_msg}")
         return {"error": f"Error queuing episode task: {error_msg}"}
 
 
@@ -887,10 +819,8 @@ def create_llm_client(api_key: str | None = None, model: str | None = None) -> L
     return OpenAIClient(config=llm_config)
 
 
-async def initialize_server() -> MCPConfig:
-    """Initialize the Graphiti server with the specified LLM client."""
-    global config
-
+async def initialize_server() -> tuple[MCPConfig, FastMCP]:
+    """Parse args and create both config and MCP instance."""
     parser = argparse.ArgumentParser(
         description="Run the Graphiti MCP server with optional LLM client"
     )
@@ -922,8 +852,21 @@ async def initialize_server() -> MCPConfig:
         help="Graph ID for the knowledge graph. If not provided, "
         "a random graph ID will be generated.",
     )
+    parser.add_argument(
+        "--host",
+        # default="127.0.0.1",
+        default="0.0.0.0",
+        # help="Host address to bind the server to when using SSE transport. Default: 127.0.0.1",
+        help="Host address to bind the server to when using SSE transport. Default: 0.0.0.0",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port number to bind the server to when using SSE transport. Default: 8000",
+    )
 
-    args = parser.parse_args()
+    args: argparse.Namespace = parser.parse_args()
 
     # Set the graph_id from CLI argument or generate a random one
     if args.graph_id:
@@ -945,7 +888,6 @@ async def initialize_server() -> MCPConfig:
     # Create OpenAI client if model is specified or if OPENAI_API_KEY is available
     if args.model or config.openai_api_key:
         # Override model from command line if specified
-
         config.model_name = args.model
 
         # Create the OpenAI client
@@ -954,7 +896,17 @@ async def initialize_server() -> MCPConfig:
     # Initialize Graphiti with the specified LLM client
     await initialize_graphiti(llm_client, destroy_graph=args.destroy_graph)
 
-    return MCPConfig(transport=args.transport)
+    # Create the config
+    mcp_config = MCPConfig(transport=args.transport, host=args.host, port=args.port)
+
+    # Create the MCP instance with proper settings from config
+    mcp_instance = FastMCP(
+        "graphiti",
+        instructions=GRAPHITI_MCP_INSTRUCTIONS,
+        settings={"host": mcp_config.host, "port": mcp_config.port},
+    )
+
+    return mcp_config, mcp_instance
 
 
 # Add a shutdown flag to track shutdown state
@@ -967,12 +919,24 @@ async def graceful_shutdown(timeout: float = 5.0) -> None:
     Args:
         timeout: Maximum time to wait for tasks to complete gracefully
     """
-    global graphiti_client, queue_workers, _shutdown_in_progress
+    global \
+        graphiti_client, \
+        queue_workers, \
+        _shutdown_in_progress, \
+        _shutdown_mode, \
+        queue_progress_display
 
     # Prevent multiple shutdown attempts
     if _shutdown_in_progress:
         return
     _shutdown_in_progress = True
+
+    # Set the shutdown mode for our message
+    _shutdown_mode = "GRACEFUL"
+
+    # Stop the queue progress display (cleanup resources)
+    if queue_progress_display:
+        queue_progress_display.stop()
 
     # Suppress standard error output during shutdown to avoid showing cancellation errors
     sys.stderr = open(os.devnull, "w")
@@ -980,20 +944,25 @@ async def graceful_shutdown(timeout: float = 5.0) -> None:
     # Clear the screen to prepare for clean shutdown display
     shutdown_console.clear()
 
-    # Create a table for tracking shutdown progress
-    table = Table(box=box.ROUNDED, border_style="blue", expand=False, show_header=True)
-    table.add_column("Step", style="cyan")
-    table.add_column("Status", style="yellow")
+    # Create a table for tracking shutdown progress with custom styling
+    table = Table(
+        box=box.ROUNDED,
+        border_style="shutdown",
+        expand=False,
+        show_header=True,
+        highlight=True,
+        title="[success]Graphiti MCP Server Shutdown[/success]",
+    )
+    table.add_column("[shutdown]Step[/shutdown]", style="info")
+    table.add_column("[shutdown]Status[/shutdown]", style="info")
 
-    # Create a status for shutdown process with transient=True for cleaner exit
+    # Create a status for shutdown process
     with shutdown_console.status(
-        "[bold blue]Performing graceful shutdown...", spinner="dots"
+        "[shutdown]Performing graceful shutdown...[/shutdown]", spinner="dots"
     ) as status:
         # Add initial table
-        table.add_row("Shutdown initiated", "✓")
-        status.update(
-            Panel(table, title="[bold]Graceful Shutdown Progress[/bold]", border_style="blue")
-        )
+        table.add_row("Shutdown initiated", "[step.success]✓[/step.success]")
+        status.update(Panel(table, border_style="shutdown"))
         await asyncio.sleep(0.1)  # Small pause to ensure UI updates
 
         # 1. Cancel episode queue workers
@@ -1004,11 +973,13 @@ async def graceful_shutdown(timeout: float = 5.0) -> None:
                     if task.get_name().startswith(f"queue_worker_{group_id}"):
                         tasks.append(task)
                         task.cancel()
+                        # Add log entry for each canceled task (will be hidden by stderr redirect)
+                        logger.info(
+                            f"[task]Cancelling task {task.get_name()} - [success]Good![/success][/task]"
+                        )
 
-        table.add_row(f"Queue workers ({len(tasks)})", "✓")
-        status.update(
-            Panel(table, title="[bold]Graceful Shutdown Progress[/bold]", border_style="blue")
-        )
+        table.add_row(f"Queue workers ({len(tasks)})", "[step.success]✓[/step.success]")
+        status.update(Panel(table, border_style="shutdown"))
         await asyncio.sleep(0.1)  # Small pause to ensure UI updates
 
         # 2. Close Neo4j connection if client exists
@@ -1016,13 +987,16 @@ async def graceful_shutdown(timeout: float = 5.0) -> None:
         if graphiti_client is not None:
             try:
                 await graphiti_client.driver.close()
+                logger.info("[success]Neo4j connection closed successfully[/success]")
             except Exception:
                 neo4j_success = False
+                logger.warning("[warning]Could not close Neo4j connection cleanly[/warning]")
 
-        table.add_row("Neo4j connection", "✓" if neo4j_success else "⚠")
-        status.update(
-            Panel(table, title="[bold]Graceful Shutdown Progress[/bold]", border_style="blue")
+        table.add_row(
+            "Neo4j connection",
+            "[step.success]✓[/step.success]" if neo4j_success else "[step.warning]⚠[/step.warning]",
         )
+        status.update(Panel(table, border_style="shutdown"))
         await asyncio.sleep(0.1)  # Small pause to ensure UI updates
 
         # 3. Cancel all remaining tasks except the current one
@@ -1032,12 +1006,14 @@ async def graceful_shutdown(timeout: float = 5.0) -> None:
             if task.get_name() != "shutdown_task":
                 task.cancel()
                 remaining_tasks.append(task)
+                # Add a colorful log entry indicating this cancellation is expected
+                logger.info(
+                    f"[task]Cancelling task {task.get_name()} - [success]Expected![/success][/task]"
+                )
 
         all_tasks = tasks + remaining_tasks
-        table.add_row(f"Tasks cancelled ({len(all_tasks)})", "✓")
-        status.update(
-            Panel(table, title="[bold]Graceful Shutdown Progress[/bold]", border_style="blue")
-        )
+        table.add_row(f"Tasks cancelled ({len(all_tasks)})", "[step.success]✓[/step.success]")
+        status.update(Panel(table, border_style="shutdown"))
         await asyncio.sleep(0.1)  # Small pause to ensure UI updates
 
         # 4. Wait for all tasks to complete with timeout
@@ -1049,32 +1025,57 @@ async def graceful_shutdown(timeout: float = 5.0) -> None:
                     await asyncio.wait_for(
                         asyncio.gather(*all_tasks, return_exceptions=True), timeout
                     )
+                    logger.info("[success]All tasks completed gracefully[/success]")
             except asyncio.TimeoutError:
                 completion_success = False
+                logger.warning(f"[warning]Shutdown timed out after {timeout}s[/warning]")
 
-        table.add_row("Wait for task completion", "✓" if completion_success else "⚠")
-        status.update(
-            Panel(table, title="[bold]Graceful Shutdown Progress[/bold]", border_style="blue")
+        table.add_row(
+            "Task completion",
+            "[step.success]✓[/step.success]"
+            if completion_success
+            else "[step.warning]⚠[/step.warning]",
         )
+        status.update(Panel(table, border_style="shutdown"))
+        await asyncio.sleep(0.1)  # Small pause to ensure UI updates
+
+        # Final status row
+        table.add_row("Server shutdown", "[step.success]✓[/step.success]")
+        status.update(Panel(table, border_style="shutdown"))
 
     # Final message - outside the status context
     shutdown_console.print(
-        Panel.fit(
-            "[bold green]Graphiti MCP Server shutdown complete[/bold green]",
-            title="Shutdown",
-            border_style="green",
+        Panel(
+            "[success]Graphiti MCP Server shutdown complete[/success]\n"
+            "[normal]All resources have been released and tasks cancelled properly.[/normal]",
+            title="[success]Shutdown Complete[/success]",
+            border_style="success",
+            padding=(1, 2),
         )
     )
 
     # Reset stderr before exit
     sys.stderr = sys.__stderr__
 
-    # Use a cleaner exit approach that avoids traceback display
-    os._exit(0)  # This is cleaner for our use case than sys.exit(0)
+    # Create a final message file that main() will detect after shutdown
+    with open(".shutdown_message.txt", "w") as f:
+        f.write("GRACEFUL_SHUTDOWN_COMPLETE")
+
+    # Exit the process immediately
+    sys.exit(0)
 
 
 def force_kill() -> None:
     """Force kill the process immediately without cleanup."""
+    global _shutdown_mode, queue_progress_display
+
+    # Set the shutdown mode for our message
+    _shutdown_mode = "FORCE"
+
+    # Stop the queue progress display
+    if queue_progress_display:
+        queue_progress_display.stop()
+
     # Suppress standard error output during shutdown to avoid showing errors
     sys.stderr = open(os.devnull, "w")
 
@@ -1082,18 +1083,26 @@ def force_kill() -> None:
     shutdown_console.clear()
 
     shutdown_console.print(
-        Panel.fit(
-            "[bold red]Force killing Graphiti MCP Server![/bold red]",
-            title="Emergency Shutdown",
-            border_style="red",
+        Panel(
+            "[danger]Force killing Graphiti MCP Server![/danger]\n"
+            "[normal]No cleanup was performed. Some resources may not be properly released.[/normal]",
+            title="[danger]Emergency Shutdown[/danger]",
+            border_style="danger",
+            padding=(1, 2),
         )
     )
 
+    # Reset stderr before exit
+    sys.stderr = sys.__stderr__
+
     # Brief pause to ensure message is displayed
     shutdown_console.print()
-    os._exit(1)  # Immediate exit without any cleanup
+
+    # Use sys.exit instead of os._exit to allow atexit handlers to run
+    sys.exit(1)
 
 
+# Register the SIGTERM handler - move this after main is defined
 def setup_signal_handlers() -> None:
     """Set up signal handlers for graceful shutdown and force kill."""
     loop = asyncio.get_running_loop()
@@ -1111,83 +1120,189 @@ def setup_signal_handlers() -> None:
     # Register SIGQUIT (3) for force kill
     loop.add_signal_handler(signal.SIGQUIT, force_kill)
 
-    logger.info("Signal handlers registered:")
-    logger.info("  - SIGHUP (1): Graceful shutdown (kill -1 <pid>)")
-    logger.info("  - SIGINT (2): Graceful shutdown (Ctrl+C)")
-    logger.info("  - SIGQUIT (3): Force kill (emergency only)")
+    # SIGTERM is handled separately at the process level with signal.signal()
+
+    logger.info("[shutdown]Signal handlers registered:[/shutdown]")
+    logger.info("  - [info]SIGHUP (1)[/info]: [success]Graceful shutdown[/success] (kill -1 <pid>)")
+    logger.info("  - [info]SIGINT (2)[/info]: [success]Graceful shutdown[/success] (Ctrl+C)")
+    logger.info("  - [info]SIGQUIT (3)[/info]: [danger]Force kill[/danger] (emergency only)")
+    logger.info("  - [info]SIGTERM (15)[/info]: [success]Graceful shutdown[/success] (docker/k8s)")
 
 
 async def run_mcp_server() -> None:
     """Run the MCP server in the current event loop."""
-    # Initialize the server
-    mcp_config = await initialize_server()
+    # Get both config and server instance
+    mcp_config, mcp = await initialize_server()
 
     # Set up signal handlers for shutdown
     setup_signal_handlers()
 
-    # Clear any previous output for clean display
-    # console.clear()
+    # Initialize the queue progress display
+    queue_progress_display = QueueProgressDisplay(console, queue_stats_tracker)
+    queue_progress_display.create_progress_tasks()  # Initialize the tasks
 
     # Display the current process ID for easier signal sending
     pid = os.getpid()
 
     # Create a nice server info panel
     server_table = Table(show_header=False, box=box.SIMPLE, expand=False)
-    server_table.add_column("Property", style="cyan")
-    server_table.add_column("Value", style="green")
+    server_table.add_column("Property", style="info")
+    server_table.add_column("Value", style="success")
     server_table.add_row("Status", "Running")
     server_table.add_row("PID", str(pid))
     server_table.add_row("Transport", mcp_config.transport)
     server_table.add_row("Graph ID", config.graph_id or "None")
 
     if mcp_config.transport == "sse":
-        server_table.add_row("Address", f"{mcp.settings.host}:{mcp.settings.port}")
+        server_table.add_row("Address", f"{mcp_config.host}:{mcp_config.port}")
 
     console.print(
-        Panel(server_table, title="[bold]Graphiti MCP Server[/bold]", border_style="green")
+        Panel(
+            server_table, title="[highlight]Graphiti MCP Server[/highlight]", border_style="success"
+        )
     )
 
     # Show commands in a separate panel
     command_table = Table(show_header=False, box=box.SIMPLE, expand=False)
-    command_table.add_column("Command", style="yellow")
-    command_table.add_column("Description", style="white")
-    command_table.add_row("Ctrl+C", "Graceful shutdown")
-    command_table.add_row(f"kill -1 {pid}", "Graceful shutdown")
-    command_table.add_row(f"kill -3 {pid}", "Force kill (emergency only)")
+    command_table.add_column("Command", style="highlight")
+    command_table.add_column("Description", style="normal")
+    command_table.add_row("Ctrl+C", "[success]Graceful shutdown[/success]")
+    command_table.add_row(f"kill -1 {pid}", "[success]Graceful shutdown[/success]")
+    command_table.add_row(f"kill -3 {pid}", "[danger]Force kill[/danger] (emergency only)")
 
     console.print(
         Panel(
             command_table,
-            title="[bold]Control Commands[/bold]",
-            border_style="yellow",
+            title="[normal]Control Commands[/normal]",
+            border_style="normal",
             padding=(1, 2),
         )
     )
 
-    # Run the server with appropriate transport
-    try:
+    def create_status_obj() -> Status:
+        # Create and start the Status object once, before the Live display
         if mcp_config.transport == "stdio":
-            with console.status("[bold green]Server running...", spinner="dots"):
-                await mcp.run_stdio_async()
+            status_obj = Status(
+                Text(" STDIO Server is running...", style="normal"),
+                spinner="arc",
+                spinner_style="success",
+            )
+        else:
+            status_obj = Status(
+                Text(f" SSE Server running on {mcp_config.host}:{mcp_config.port}"),
+                spinner="arc",
+                spinner_style="green",
+            )
+        # status_obj.start()
+        return status_obj
+
+    def get_current_display(status_obj: Status) -> Group:
+        # Handle potential None case
+        progress_panel: Panel = (
+            queue_progress_display.get_renderable()
+            # if queue_progress_display
+            # else Panel("Initializing progress display...", border_style="normal")
+        )
+
+        return Group(progress_panel, status_obj)
+
+    # Run the server with appropriate transport and dynamic display
+    try:
+        status_obj: Status = create_status_obj()
+        # Get the initial display renderable
+        initial_display = get_current_display(status_obj)
+
+        if mcp_config.transport == "stdio":
+            with Live(
+                initial_display,
+                console=console,
+                refresh_per_second=4,
+                transient=False,
+            ) as live:
+                # Create a refresh task that updates the display periodically
+                refresh_task = asyncio.create_task(
+                    _refresh_display_periodically(
+                        live, get_current_display, 0.25
+                    )  # 4 times per second
+                )
+                try:
+                    await mcp.run_stdio_async()
+                finally:
+                    # Cancel the refresh task when the server stops
+                    refresh_task.cancel()
         elif mcp_config.transport == "sse":
-            with console.status(
-                "[bold green]Server running on " + f"{mcp.settings.host}:{mcp.settings.port}",
-                spinner="dots",
-            ):
-                await mcp.run_sse_async()
+            with Live(
+                initial_display,
+                console=console,
+                refresh_per_second=4,
+                transient=False,
+            ) as live:
+                # Create a refresh task that updates the display periodically
+                refresh_task = asyncio.create_task(
+                    _refresh_display_periodically(
+                        live, get_current_display, 0.25
+                    )  # 4 times per second
+                )
+                try:
+                    await mcp.run_sse_async()
+                finally:
+                    # Cancel the refresh task when the server stops
+                    refresh_task.cancel()
     except asyncio.CancelledError:
-        # This is expected during shutdown, suppress the error message
+        # Stop the status object
+        # status_obj.stop()
+        # Mark this as an expected event with color coding
+        logger.info(
+            "[success]Server shutdown initiated - tasks being cancelled (this is normal)[/success]"
+        )
         pass
+
+
+async def _refresh_display_periodically(live, get_display_fn, interval):
+    """Periodically refresh the live display with fresh content.
+
+    Args:
+        live: The Live display instance
+        get_display_fn: Function that returns a fresh renderable
+        interval: Time between updates in seconds
+    """
+    try:
+        while True:
+            # Update the live display with fresh content
+            live.update(get_display_fn())
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        # Exit cleanly when cancelled
+        pass
+
+
+# Add a trap for SIGTERM to handle docker/kubernetes style shutdowns
+def sigterm_handler(signum: int, frame: Any) -> None:
+    """Handle SIGTERM (15) by starting graceful shutdown."""
+    global _shutdown_mode
+    _shutdown_mode = "GRACEFUL"
+    print("\nSIGTERM received. Initiating graceful shutdown...")
+    sys.exit(0)  # This will trigger our atexit handler
 
 
 def main() -> None:
     """Main function to run the Graphiti MCP server."""
+    # Register the SIGTERM handler at the process level
+    signal.signal(signal.SIGTERM, sigterm_handler)
+
+    # Add a try-finally to ensure our message is shown
     try:
         # Run everything in a single event loop
         asyncio.run(run_mcp_server())
     except Exception as e:
+        # Ensure we show an error but also our final message
         logger.error(f"Error initializing Graphiti MCP server: {str(e)}")
+        _shutdown_mode = "GRACEFUL"  # Use graceful message even for errors
+        # Let the exception propagate so the traceback is shown
         raise
+    finally:
+        # Ensure we reset stderr
+        sys.stderr = sys.__stderr__
 
 
 if __name__ == "__main__":
