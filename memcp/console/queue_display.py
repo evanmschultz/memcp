@@ -15,7 +15,7 @@ class QueueProgressDisplay:
     the display of queue statistics, not the tracking of those statistics.
     """
 
-    def __init__(self, console: Console, stats_tracker: QueueStatsTracker) -> None:
+    def __init__(self, console: Console, stats_tracker: "QueueStatsTracker") -> None:
         """Initialize the progress display.
 
         Args:

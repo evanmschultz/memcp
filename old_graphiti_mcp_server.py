@@ -2,6 +2,8 @@
 """Graphiti MCP Server - Exposes Graphiti functionality through the Model Context Protocol (MCP)."""
 
 from memcp.config.settings import GraphitiConfig, MCPConfig
+from memcp.console.queue_display import QueueProgressDisplay
+from memcp.core.queue import QueueManager, QueueStatsTracker
 from memcp.memcp_typings import MEMCP_ENTITIES
 from memcp.models.responses import (
     EpisodeSearchResponse,
@@ -12,12 +14,7 @@ from memcp.models.responses import (
     StatusResponse,
     SuccessResponse,
 )
-from queue_adapter import QueueProgressDisplayCompat as QueueProgressDisplay
-
-# Import the queue-related classes from our adapter instead of directly
-# from queue_progress_display import QueueProgressDisplay
-# from queue_stats import QueueStatsTracker
-from queue_adapter import QueueStatsTrackerCompat as QueueStatsTracker
+from memcp.utils import GRAPHITI_THEME, configure_logging, get_logger
 
 import argparse
 import asyncio
@@ -49,48 +46,25 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 from rich import box
 from rich.console import Console, Group
-from rich.highlighter import ReprHighlighter
 from rich.live import Live
-from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.status import Status
 from rich.table import Table
 from rich.text import Text
-from rich.theme import Theme
-from rich.traceback import install as install_rich_traceback
-
-# Custom theme for our console
-GRAPHITI_THEME = Theme(
-    {
-        "info": "dim cyan",
-        "warning": "yellow",
-        "danger": "bold red",
-        "success": "bold green",
-        "shutdown": "bold blue",
-        "task": "dim magenta",
-        "highlight": "bold cyan",
-        "normal": "white",
-        "step.success": "green",
-        "step.warning": "yellow",
-    }
-)
-
-# Install rich traceback handler with custom filters to hide CancelledError
-install_rich_traceback(
-    show_locals=False,
-    suppress=["asyncio.exceptions.CancelledError"],
-)
 
 load_dotenv()
 
-# Initialize Rich consoles with our custom theme
-console = Console(theme=GRAPHITI_THEME)
+
+# Configure logging
+configure_logging()
+
+# Get a logger for this module
+logger = get_logger(__name__)
+
+
 shutdown_console = Console(stderr=True, theme=GRAPHITI_THEME)
 progress_console = Console(theme=GRAPHITI_THEME)  # New console for progress display
 
-# Create global instances for queue tracking and display
-queue_stats_tracker = QueueStatsTracker()
-queue_progress_display = None  # Will be initialized in the run_mcp_server function
 
 # Set up a global variable to track if we're shutting down
 _original_excepthook = sys.excepthook
@@ -144,30 +118,17 @@ def show_final_message() -> None:
 atexit.register(show_final_message)
 
 
-# Configure logging with Rich to minimize noise and add colors
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    handlers=[
-        RichHandler(
-            console=console,
-            rich_tracebacks=True,
-            tracebacks_show_locals=False,
-            markup=True,
-            show_time=False,
-            show_path=False,
-            enable_link_path=False,  # Disable clickable file paths
-            highlighter=ReprHighlighter(),
-        )
-    ],
-)
-
 # Configure root logger to ignore asyncio cancellation errors during shutdown
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # Create global config instance
 config: GraphitiConfig = GraphitiConfig.from_env()
+
+# Global references to important components
+graphiti_client: Graphiti | None = None
+queue_manager: QueueManager | None = None
+
 
 # MCP server instructions
 GRAPHITI_MCP_INSTRUCTIONS = """
@@ -207,10 +168,6 @@ mcp = FastMCP(
     instructions=GRAPHITI_MCP_INSTRUCTIONS,
     settings={"host": "0.0.0.0", "port": 8000},
 )
-
-
-# Initialize Graphiti client
-graphiti_client: Graphiti | None = None
 
 
 async def initialize_graphiti(
@@ -272,80 +229,6 @@ def format_fact_result(edge: EntityEdge) -> dict[str, Any]:
             "fact_embedding",
         },
     )
-
-
-# Dictionary to store queues for each group_id
-# Each queue is a list of tasks to be processed sequentially
-episode_queues: dict[str, asyncio.Queue] = {}
-# Dictionary to track if a worker is running for each group_id
-queue_workers: dict[str, bool] = {}
-
-
-async def process_episode_queue(group_id: str) -> None:
-    """Process episodes for a specific group_id sequentially.
-
-    This function runs as a long-lived task that processes episodes
-    from the queue one at a time.
-    """
-    global queue_workers, queue_stats_tracker, queue_progress_display
-
-    # Name the task to be able to identify it during shutdown
-    current_task = asyncio.current_task()
-    if current_task:
-        current_task.set_name(f"queue_worker_{group_id}")
-
-    logger.info(f"Starting episode queue worker for group_id: [highlight]{group_id}[/highlight]")
-    queue_workers[group_id] = True
-
-    try:
-        while True:
-            # Get the next episode processing function from the queue
-            # This will wait if the queue is empty
-            process_func = await episode_queues[group_id].get()
-
-            # Generate a unique task ID for tracking
-            task_id = str(uuid.uuid4())
-
-            try:
-                # Record that processing has started
-                queue_stats_tracker.start_processing(group_id, task_id)
-
-                # Update the progress display
-                if queue_progress_display:
-                    queue_progress_display.update()
-
-                # Process the episode
-                await process_func()
-
-                # Record successful completion
-                queue_stats_tracker.complete_task(group_id, task_id, success=True)
-            except Exception as e:
-                # Record failed completion
-                queue_stats_tracker.complete_task(group_id, task_id, success=False)
-
-                logger.error(
-                    f"Error processing queued episode for group_id [highlight]{group_id}[/highlight]: [danger]{str(e)}[/danger]"
-                )
-            finally:
-                # Mark the task as done regardless of success/failure
-                episode_queues[group_id].task_done()
-
-                # Update the progress display
-                if queue_progress_display:
-                    queue_progress_display.update()
-    except asyncio.CancelledError:
-        logger.info(
-            f"Episode queue worker for group_id [highlight]{group_id}[/highlight] was [success]cancelled[/success]"
-        )
-    except Exception as e:
-        logger.error(
-            f"Unexpected error in queue worker for group_id [highlight]{group_id}[/highlight]: [danger]{str(e)}[/danger]"
-        )
-    finally:
-        queue_workers[group_id] = False
-        logger.info(
-            f"[success]Stopped[/success] episode queue worker for group_id: [highlight]{group_id}[/highlight]"
-        )
 
 
 @mcp.tool()
@@ -412,15 +295,12 @@ async def add_episode(
         - Entities will be created from appropriate JSON properties
         - Relationships between entities will be established based on the JSON structure
     """  # noqa: E501
-    global \
-        graphiti_client, \
-        episode_queues, \
-        queue_workers, \
-        queue_stats_tracker, \
-        queue_progress_display
-
+    global graphiti_client, queue_manager
     if graphiti_client is None:
         return {"error": "Graphiti client not initialized"}
+
+    if queue_manager is None:
+        return {"error": "Queue manager not initialized"}
 
     try:
         # Map string source to EpisodeType enum
@@ -476,27 +356,17 @@ async def add_episode(
                     f"[danger]Error[/danger] processing episode '[highlight]{name}[/highlight]' for graph_id [highlight]{graph_id_str}[/highlight]: [danger]{error_msg}[/danger]"
                 )
 
-        # Initialize queue for this graph_id if it doesn't exist
-        if graph_id_str not in episode_queues:
-            episode_queues[graph_id_str] = asyncio.Queue()
-
-        # Track the new task in our stats tracker
-        queue_stats_tracker.add_task(graph_id_str)
-
-        # Update the progress display immediately
-        if queue_progress_display:
-            queue_progress_display.update()
-
-        # Add the episode processing function to the queue
-        await episode_queues[graph_id_str].put(process_episode)
-
-        # Start a worker for this queue if one isn't already running
-        if not queue_workers.get(graph_id_str, False):
-            asyncio.create_task(process_episode_queue(graph_id_str))
+        # Enqueue the task for processing
+        await queue_manager.enqueue_task(graph_id_str, process_episode)
 
         # Return immediately with a success message
+        # Use the queue size from the queue manager's queue for this group_id
+        queue_size = 0
+        if graph_id_str in queue_manager.episode_queues:
+            queue_size = queue_manager.episode_queues[graph_id_str].qsize()
+
         return {
-            "message": f"Episode '[highlight]{name}[/highlight]' queued for processing (position: [highlight]{episode_queues[graph_id_str].qsize()}[/highlight])"
+            "message": f"Episode '[highlight]{name}[/highlight]' queued for processing (position: [highlight]{queue_size}[/highlight])"
         }
     except Exception as e:
         error_msg = str(e)
@@ -854,9 +724,7 @@ async def initialize_server() -> tuple[MCPConfig, FastMCP]:
     )
     parser.add_argument(
         "--host",
-        # default="127.0.0.1",
         default="0.0.0.0",
-        # help="Host address to bind the server to when using SSE transport. Default: 127.0.0.1",
         help="Host address to bind the server to when using SSE transport. Default: 0.0.0.0",
     )
     parser.add_argument(
@@ -913,19 +781,17 @@ async def initialize_server() -> tuple[MCPConfig, FastMCP]:
 _shutdown_in_progress = False
 
 
-async def graceful_shutdown(timeout: float = 5.0) -> None:
+async def graceful_shutdown(
+    queue_manager: QueueManager, queue_progress_display: QueueProgressDisplay, timeout: float = 5.0
+) -> None:
     """Perform graceful shutdown of the MCP server and all resources.
 
     Args:
+        queue_manager: The queue manager to shut down
+        queue_progress_display: The progress display to use for the shutdown visualization
         timeout: Maximum time to wait for tasks to complete gracefully
     """
-    global \
-        graphiti_client, \
-        queue_workers, \
-        _shutdown_in_progress, \
-        _shutdown_mode, \
-        queue_progress_display
-
+    global graphiti_client, _shutdown_in_progress, _shutdown_mode
     # Prevent multiple shutdown attempts
     if _shutdown_in_progress:
         return
@@ -965,20 +831,10 @@ async def graceful_shutdown(timeout: float = 5.0) -> None:
         status.update(Panel(table, border_style="shutdown"))
         await asyncio.sleep(0.1)  # Small pause to ensure UI updates
 
-        # 1. Cancel episode queue workers
-        tasks = []
-        for group_id in list(queue_workers.keys()):
-            if queue_workers.get(group_id, False):
-                for task in asyncio.all_tasks():
-                    if task.get_name().startswith(f"queue_worker_{group_id}"):
-                        tasks.append(task)
-                        task.cancel()
-                        # Add log entry for each canceled task (will be hidden by stderr redirect)
-                        logger.info(
-                            f"[task]Cancelling task {task.get_name()} - [success]Good![/success][/task]"
-                        )
+        # 1. Cancel queue workers
+        active_worker_count = queue_manager.cancel_all_workers()
 
-        table.add_row(f"Queue workers ({len(tasks)})", "[step.success]✓[/step.success]")
+        table.add_row(f"Queue workers ({active_worker_count})", "[step.success]✓[/step.success]")
         status.update(Panel(table, border_style="shutdown"))
         await asyncio.sleep(0.1)  # Small pause to ensure UI updates
 
@@ -1011,19 +867,18 @@ async def graceful_shutdown(timeout: float = 5.0) -> None:
                     f"[task]Cancelling task {task.get_name()} - [success]Expected![/success][/task]"
                 )
 
-        all_tasks = tasks + remaining_tasks
-        table.add_row(f"Tasks cancelled ({len(all_tasks)})", "[step.success]✓[/step.success]")
+        table.add_row(f"Tasks cancelled ({len(remaining_tasks)})", "[step.success]✓[/step.success]")
         status.update(Panel(table, border_style="shutdown"))
         await asyncio.sleep(0.1)  # Small pause to ensure UI updates
 
         # 4. Wait for all tasks to complete with timeout
         completion_success = True
-        if all_tasks:
+        if remaining_tasks:
             try:
                 # Suppress cancellation errors during shutdown
                 with contextlib.suppress(asyncio.CancelledError):
                     await asyncio.wait_for(
-                        asyncio.gather(*all_tasks, return_exceptions=True), timeout
+                        asyncio.gather(*remaining_tasks, return_exceptions=True), timeout
                     )
                     logger.info("[success]All tasks completed gracefully[/success]")
             except asyncio.TimeoutError:
@@ -1065,9 +920,13 @@ async def graceful_shutdown(timeout: float = 5.0) -> None:
     sys.exit(0)
 
 
-def force_kill() -> None:
-    """Force kill the process immediately without cleanup."""
-    global _shutdown_mode, queue_progress_display
+def force_kill(queue_progress_display: QueueProgressDisplay) -> None:
+    """Force kill the process immediately without cleanup.
+
+    Args:
+        queue_progress_display: The progress display to use for the episode
+    """
+    global _shutdown_mode
 
     # Set the shutdown mode for our message
     _shutdown_mode = "FORCE"
@@ -1103,22 +962,30 @@ def force_kill() -> None:
 
 
 # Register the SIGTERM handler - move this after main is defined
-def setup_signal_handlers() -> None:
+def setup_signal_handlers(
+    queue_manager: QueueManager, queue_progress_display: QueueProgressDisplay
+) -> None:
     """Set up signal handlers for graceful shutdown and force kill."""
     loop = asyncio.get_running_loop()
 
     # Register SIGHUP (1) for graceful shutdown
     loop.add_signal_handler(
-        signal.SIGHUP, lambda: asyncio.create_task(graceful_shutdown(), name="shutdown_task")
+        signal.SIGHUP,
+        lambda: asyncio.create_task(
+            graceful_shutdown(queue_manager, queue_progress_display), name="shutdown_task"
+        ),
     )
 
     # Register SIGINT (2/Ctrl+C) for graceful shutdown as well
     loop.add_signal_handler(
-        signal.SIGINT, lambda: asyncio.create_task(graceful_shutdown(), name="shutdown_task")
+        signal.SIGINT,
+        lambda: asyncio.create_task(
+            graceful_shutdown(queue_manager, queue_progress_display), name="shutdown_task"
+        ),
     )
 
     # Register SIGQUIT (3) for force kill
-    loop.add_signal_handler(signal.SIGQUIT, force_kill)
+    loop.add_signal_handler(signal.SIGQUIT, lambda: force_kill(queue_progress_display))
 
     # SIGTERM is handled separately at the process level with signal.signal()
 
@@ -1129,16 +996,44 @@ def setup_signal_handlers() -> None:
     logger.info("  - [info]SIGTERM (15)[/info]: [success]Graceful shutdown[/success] (docker/k8s)")
 
 
+async def _refresh_display_periodically(live, get_display_fn, interval):
+    """Periodically refresh the live display with fresh content.
+
+    Args:
+        live: The Live display instance
+        get_display_fn: Function that returns a fresh renderable
+        interval: Time between updates in seconds
+    """
+    try:
+        while True:
+            # Update the live display with fresh content
+            live.update(get_display_fn())
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:
+        # Exit cleanly when cancelled
+        pass
+
+
 async def run_mcp_server() -> None:
     """Run the MCP server in the current event loop."""
+    global queue_manager
+
     # Get both config and server instance
     mcp_config, mcp = await initialize_server()
 
+    # Create global instances for queue tracking and display
+    console = Console(theme=GRAPHITI_THEME)
+    queue_stats_tracker = QueueStatsTracker()
+    queue_manager = QueueManager(queue_stats_tracker)
+    queue_progress_display = QueueProgressDisplay(console, queue_stats_tracker)
+
+    # Add the display as a state change callback for the queue manager
+    queue_manager.add_state_change_callback(queue_progress_display.update)
+
     # Set up signal handlers for shutdown
-    setup_signal_handlers()
+    setup_signal_handlers(queue_manager, queue_progress_display)
 
     # Initialize the queue progress display
-    queue_progress_display = QueueProgressDisplay(console, queue_stats_tracker)
     queue_progress_display.create_progress_tasks()  # Initialize the tasks
 
     # Display the current process ID for easier signal sending
@@ -1193,17 +1088,11 @@ async def run_mcp_server() -> None:
                 spinner="arc",
                 spinner_style="green",
             )
-        # status_obj.start()
         return status_obj
 
     def get_current_display(status_obj: Status) -> Group:
         # Handle potential None case
-        progress_panel: Panel = (
-            queue_progress_display.get_renderable()
-            # if queue_progress_display
-            # else Panel("Initializing progress display...", border_style="normal")
-        )
-
+        progress_panel: Panel = queue_progress_display.get_renderable()
         return Group(progress_panel, status_obj)
 
     # Run the server with appropriate transport and dynamic display
@@ -1222,7 +1111,7 @@ async def run_mcp_server() -> None:
                 # Create a refresh task that updates the display periodically
                 refresh_task = asyncio.create_task(
                     _refresh_display_periodically(
-                        live, get_current_display, 0.25
+                        live, lambda: get_current_display(status_obj), 0.25
                     )  # 4 times per second
                 )
                 try:
@@ -1240,7 +1129,7 @@ async def run_mcp_server() -> None:
                 # Create a refresh task that updates the display periodically
                 refresh_task = asyncio.create_task(
                     _refresh_display_periodically(
-                        live, get_current_display, 0.25
+                        live, lambda: get_current_display(status_obj), 0.25
                     )  # 4 times per second
                 )
                 try:
@@ -1249,30 +1138,10 @@ async def run_mcp_server() -> None:
                     # Cancel the refresh task when the server stops
                     refresh_task.cancel()
     except asyncio.CancelledError:
-        # Stop the status object
-        # status_obj.stop()
         # Mark this as an expected event with color coding
         logger.info(
             "[success]Server shutdown initiated - tasks being cancelled (this is normal)[/success]"
         )
-        pass
-
-
-async def _refresh_display_periodically(live, get_display_fn, interval):
-    """Periodically refresh the live display with fresh content.
-
-    Args:
-        live: The Live display instance
-        get_display_fn: Function that returns a fresh renderable
-        interval: Time between updates in seconds
-    """
-    try:
-        while True:
-            # Update the live display with fresh content
-            live.update(get_display_fn())
-            await asyncio.sleep(interval)
-    except asyncio.CancelledError:
-        # Exit cleanly when cancelled
         pass
 
 
