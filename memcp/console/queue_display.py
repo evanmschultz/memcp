@@ -11,8 +11,8 @@ from rich.table import Table
 class QueueProgressDisplay:
     """Displays the progress of episode processing queues.
 
-    This class follows the single responsibility principle by only handling
-    the display of queue statistics, not the tracking of those statistics.
+    This class is responsible ONLY for rendering queue statistics.
+    It does not handle updates directly.
     """
 
     def __init__(self, console: Console, stats_tracker: "QueueStatsTracker") -> None:
@@ -25,7 +25,7 @@ class QueueProgressDisplay:
         self.console = console
         self.stats_tracker = stats_tracker
 
-        # Create progress display
+        # Create a single progress display object that will be reused
         self.progress = Progress(
             SpinnerColumn(),
             TextColumn("[bold cyan]{task.description}"),
@@ -41,16 +41,25 @@ class QueueProgressDisplay:
         # Track task IDs by queue_id
         self.tasks: dict[str, TaskID] = {}
 
-        # Flag to indicate if tasks have been created
-        self.initialized = False
+        # Create a single Panel instance that wraps the Progress
+        self.panel = Panel(
+            self.progress,
+            title="[bold cyan]Queue Progress[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
 
-    def create_progress_tasks(self) -> None:
-        """Create or update progress tasks based on current queue stats."""
+    def render(self) -> None:
+        """Update the progress display with current statistics.
+
+        This renders the current state of queue stats onto the progress object.
+        """
         stats = self.stats_tracker.get_stats()
         totals = self.stats_tracker.get_totals()
 
-        # Create a total task
-        if "total" not in self.tasks:
+        # Initialize tasks if not already done
+        if not self.tasks:
+            # Create a total task
             self.tasks["total"] = self.progress.add_task(
                 "[bold blue]Total Progress",
                 total=max(totals["total"], 1),  # Avoid division by zero
@@ -58,7 +67,18 @@ class QueueProgressDisplay:
                 count=f"{totals['completed']}/{totals['total']}",
                 time=f"avg: {totals['avg_time']:.1f}s",
             )
+
+            # Create tasks for each queue
+            for queue_id, queue_stats in stats.items():
+                self.tasks[queue_id] = self.progress.add_task(
+                    f"[green]{queue_id}",
+                    total=max(queue_stats["total"], 1),
+                    completed=queue_stats["completed"],
+                    count=f"{queue_stats['completed']}/{queue_stats['total']}",
+                    time=f"avg: {queue_stats['avg_time']:.1f}s",
+                )
         else:
+            # Update the total task
             self.progress.update(
                 self.tasks["total"],
                 total=max(totals["total"], 1),
@@ -67,30 +87,34 @@ class QueueProgressDisplay:
                 time=f"avg: {totals['avg_time']:.1f}s",
             )
 
-        # Create/update tasks for each queue
-        for queue_id, queue_stats in stats.items():
-            if queue_id not in self.tasks:
-                self.tasks[queue_id] = self.progress.add_task(
-                    f"[green]{queue_id}",
-                    total=max(queue_stats["total"], 1),
-                    completed=queue_stats["completed"],
-                    count=f"{queue_stats['completed']}/{queue_stats['total']}",
-                    time=f"avg: {queue_stats['avg_time']:.1f}s",
-                )
-            else:
-                self.progress.update(
-                    self.tasks[queue_id],
-                    total=max(queue_stats["total"], 1),
-                    completed=queue_stats["completed"],
-                    count=f"{queue_stats['completed']}/{queue_stats['total']}",
-                    time=f"avg: {queue_stats['avg_time']:.1f}s",
-                )
+            # Update existing tasks and add new ones for each queue
+            for queue_id, queue_stats in stats.items():
+                # Create a new task if this is a new queue
+                if queue_id not in self.tasks:
+                    self.tasks[queue_id] = self.progress.add_task(
+                        f"[green]{queue_id}",
+                        total=max(queue_stats["total"], 1),
+                        completed=queue_stats["completed"],
+                        count=f"{queue_stats['completed']}/{queue_stats['total']}",
+                        time=f"avg: {queue_stats['avg_time']:.1f}s",
+                    )
+                else:
+                    # Update existing task
+                    self.progress.update(
+                        self.tasks[queue_id],
+                        total=max(queue_stats["total"], 1),
+                        completed=queue_stats["completed"],
+                        count=f"{queue_stats['completed']}/{queue_stats['total']}",
+                        time=f"avg: {queue_stats['avg_time']:.1f}s",
+                    )
 
-        self.initialized = True
+    def get_renderable(self) -> Panel:
+        """Get the current progress display as a renderable panel.
 
-    def update(self) -> None:
-        """Update the progress display with current statistics."""
-        self.create_progress_tasks()
+        Returns the same Panel object each time, which contains the
+        continuously updated Progress object.
+        """
+        return self.panel
 
     def generate_status_table(self) -> Table:
         """Generate a detailed status table of all queues.
@@ -134,19 +158,6 @@ class QueueProgressDisplay:
 
         return table
 
-    def get_renderable(self) -> Panel:
-        """Get the current progress display as a renderable panel."""
-        # Ensure tasks are created and updated
-        if not self.initialized:
-            self.create_progress_tasks()
-
-        return Panel(
-            self.progress,
-            title="[bold cyan]Queue Progress[/bold cyan]",
-            border_style="cyan",
-            padding=(1, 2),
-        )
-
     def stop(self) -> None:
         """Clean up any resources used by the display."""
-        pass  # No longer managing a Live display
+        pass  # No resources to clean up
