@@ -64,16 +64,16 @@ class MemCPServer:
             destroy_graph: Whether to destroy existing graphs
         """
         if (
-            not self.graphiti_config.neo4j_uri
-            or not self.graphiti_config.neo4j_user
-            or not self.graphiti_config.neo4j_password
+            not self.graphiti_config.neo4j.uri
+            or not self.graphiti_config.neo4j.user
+            or not self.graphiti_config.neo4j.password
         ):
             raise ValueError("NEO4J_URI, NEO4J_USER, and NEO4J_PASSWORD must be set")
 
         self.graphiti_client = Graphiti(
-            uri=self.graphiti_config.neo4j_uri,
-            user=self.graphiti_config.neo4j_user,
-            password=self.graphiti_config.neo4j_password,
+            uri=self.graphiti_config.neo4j.uri,
+            user=self.graphiti_config.neo4j.user,
+            password=self.graphiti_config.neo4j.password,
             llm_client=llm_client,
         )
 
@@ -175,7 +175,7 @@ class MemCPServer:
 
         # Display the process ID and server info
         pid = os.getpid()
-        self.display_manager.show_server_info(self.mcp_config, self.graphiti_config.graph_id, pid)
+        self.display_manager.show_server_info(self.mcp_config, self.graphiti_config.graph.id, pid)
 
         # Run the server
         try:

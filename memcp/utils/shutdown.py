@@ -67,16 +67,12 @@ class ShutdownManager:
         """Display a final message after shutdown based on the shutdown mode."""
         print("\n\n" + "-" * 80)
         if self.mode == self.GRACEFUL:
+            self.console.print("[bold green]✅ GRAPHITI SERVER SHUTDOWN SUCCESSFULLY[/bold green]\n")
             self.console.print(
-                "[bold green]✅ GRAPHITI SERVER SHUTDOWN SUCCESSFULLY[/bold green]\n"
+                "\n[info]The asyncio CancelledError tracebacks above are normal and expected during shutdown.[/info]"
             )
             self.console.print(
-                "\n[info]The asyncio CancelledError tracebacks above are normal and expected "
-                "during shutdown.[/info]"
-            )
-            self.console.print(
-                "\n[info]All tasks were properly cancelled and resources were released "
-                "cleanly.[/info]\n"
+                "\n[info]All tasks were properly cancelled and resources were released cleanly.[/info]\n"
             )
         elif self.mode == self.FORCE:
             self.console.print("[bold red]⚠️ GRAPHITI SERVER FORCE KILLED[/bold red]\n")
@@ -156,9 +152,7 @@ class ShutdownManager:
         table.add_column("[shutdown]Status[/shutdown]", style="info")
 
         # Display shutdown progress
-        with self.console.status(
-            "[shutdown]Performing graceful shutdown...[/shutdown]", spinner="dots"
-        ) as status:
+        with self.console.status("[shutdown]Performing graceful shutdown...[/shutdown]", spinner="dots") as status:
             # Add initial table
             table.add_row("Shutdown initiated", "[step.success]✓[/step.success]")
             status.update(Panel(table, border_style="shutdown"))
@@ -167,9 +161,7 @@ class ShutdownManager:
             # 1. Cancel queue workers
             active_worker_count = queue_manager.cancel_all_workers()
 
-            table.add_row(
-                f"Queue workers ({active_worker_count})", "[step.success]✓[/step.success]"
-            )
+            table.add_row(f"Queue workers ({active_worker_count})", "[step.success]✓[/step.success]")
             status.update(Panel(table, border_style="shutdown"))
             await asyncio.sleep(0.1)
 
@@ -185,9 +177,7 @@ class ShutdownManager:
 
             table.add_row(
                 "Neo4j connection",
-                "[step.success]✓[/step.success]"
-                if neo4j_success
-                else "[step.warning]⚠[/step.warning]",
+                "[step.success]✓[/step.success]" if neo4j_success else "[step.warning]⚠[/step.warning]",
             )
             status.update(Panel(table, border_style="shutdown"))
             await asyncio.sleep(0.1)
@@ -199,14 +189,9 @@ class ShutdownManager:
                 if task.get_name() != "shutdown_task":
                     task.cancel()
                     remaining_tasks.append(task)
-                    logger.info(
-                        f"[task]Cancelling task {task.get_name()} - [success]Expected!"
-                        "[/success][/task]"
-                    )
+                    logger.info(f"[task]Cancelling task {task.get_name()} - [success]Expected![/success][/task]")
 
-            table.add_row(
-                f"Tasks cancelled ({len(remaining_tasks)})", "[step.success]✓[/step.success]"
-            )
+            table.add_row(f"Tasks cancelled ({len(remaining_tasks)})", "[step.success]✓[/step.success]")
             status.update(Panel(table, border_style="shutdown"))
             await asyncio.sleep(0.1)
 
@@ -216,9 +201,7 @@ class ShutdownManager:
                 try:
                     # Suppress cancellation errors during shutdown
                     with contextlib.suppress(asyncio.CancelledError):
-                        await asyncio.wait_for(
-                            asyncio.gather(*remaining_tasks, return_exceptions=True), timeout
-                        )
+                        await asyncio.wait_for(asyncio.gather(*remaining_tasks, return_exceptions=True), timeout)
                         logger.info("[success]All tasks completed gracefully[/success]")
                 except asyncio.TimeoutError:
                     completion_success = False
@@ -226,9 +209,7 @@ class ShutdownManager:
 
             table.add_row(
                 "Task completion",
-                "[step.success]✓[/step.success]"
-                if completion_success
-                else "[step.warning]⚠[/step.warning]",
+                "[step.success]✓[/step.success]" if completion_success else "[step.warning]⚠[/step.warning]",
             )
             status.update(Panel(table, border_style="shutdown"))
             await asyncio.sleep(0.1)
@@ -324,9 +305,7 @@ class ShutdownManager:
         # Define handlers
         def graceful_handler():
             return lambda: asyncio.create_task(
-                self.graceful_shutdown(
-                    queue_manager, queue_progress_display, graphiti_client, logger, display_manager
-                ),
+                self.graceful_shutdown(queue_manager, queue_progress_display, graphiti_client, logger, display_manager),
                 name="shutdown_task",
             )
 
@@ -346,15 +325,15 @@ class ShutdownManager:
             ),
         )
 
-        logger.info("[shutdown]Signal handlers registered:[/shutdown]")
-        logger.info(
-            "  - [info]SIGHUP (1)[/info]: [success]Graceful shutdown[/success] (kill -1 <pid>)"
-        )
-        logger.info("  - [info]SIGINT (2)[/info]: [success]Graceful shutdown[/success] (Ctrl+C)")
-        logger.info("  - [info]SIGQUIT (3)[/info]: [danger]Force kill[/danger] (emergency only)")
-        logger.info(
-            "  - [info]SIGTERM (15)[/info]: [success]Graceful shutdown[/success] (docker/k8s)"
-        )
+        # logger.info("[shutdown]Signal handlers registered:[/shutdown]")
+        # logger.info(
+        #     "  - [info]SIGHUP (1)[/info]: [success]Graceful shutdown[/success] (kill -1 <pid>)"
+        # )
+        # logger.info("  - [info]SIGINT (2)[/info]: [success]Graceful shutdown[/success] (Ctrl+C)")
+        # logger.info("  - [info]SIGQUIT (3)[/info]: [danger]Force kill[/danger] (emergency only)")
+        # logger.info(
+        #     "  - [info]SIGTERM (15)[/info]: [success]Graceful shutdown[/success] (docker/k8s)"
+        # )
 
     def _create_sigterm_handler(
         self,
@@ -385,9 +364,7 @@ class ShutdownManager:
             # Create and run shutdown task
             loop = asyncio.get_event_loop()
             loop.create_task(
-                self.graceful_shutdown(
-                    queue_manager, queue_progress_display, graphiti_client, logger, display_manager
-                ),
+                self.graceful_shutdown(queue_manager, queue_progress_display, graphiti_client, logger, display_manager),
                 name="shutdown_task",
             )
 

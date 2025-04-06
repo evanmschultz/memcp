@@ -115,7 +115,7 @@ class MCPToolsRegistry:
                 source_type = EpisodeType.json
 
             # Use the provided graph_id or fall back to the default from config
-            effective_graph_id = graph_id if graph_id is not None else self.config.graph_id
+            effective_graph_id = graph_id if graph_id is not None else self.config.graph.id
 
             # Cast graph_id to str to satisfy type checker
             graph_id_str = str(effective_graph_id) if effective_graph_id is not None else ""
@@ -129,7 +129,7 @@ class MCPToolsRegistry:
                         f"Processing queued episode '[highlight]{name}[/highlight]' for graph_id: [highlight]{graph_id_str}[/highlight]"
                     )
                     # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
-                    entity_types = MEMCP_ENTITIES if self.config.use_custom_entities else {}
+                    entity_types = MEMCP_ENTITIES if self.config.graph.use_custom_entities else {}
 
                     # Cast to dict[str, BaseModel] to match the expected type in Graphiti
                     await client.add_episode(
@@ -142,18 +142,12 @@ class MCPToolsRegistry:
                         reference_time=datetime.now(timezone.utc),
                         entity_types=cast("dict[str, BaseModel]", entity_types),
                     )
-                    logger.info(
-                        f"Episode '[highlight]{name}[/highlight]' [success]added successfully[/success]"
-                    )
+                    logger.info(f"Episode '[highlight]{name}[/highlight]' [success]added successfully[/success]")
 
-                    logger.info(
-                        f"Building communities after episode '[highlight]{name}[/highlight]'"
-                    )
+                    logger.info(f"Building communities after episode '[highlight]{name}[/highlight]'")
                     await client.build_communities()
 
-                    logger.info(
-                        f"Episode '[highlight]{name}[/highlight]' [success]processed successfully[/success]"
-                    )
+                    logger.info(f"Episode '[highlight]{name}[/highlight]' [success]processed successfully[/success]")
                 except Exception as e:
                     error_msg = str(e)
                     logger.error(
@@ -203,11 +197,7 @@ class MCPToolsRegistry:
         try:
             # Use the provided graph_ids or fall back to the default from config if none provided
             effective_graph_ids = (
-                graph_ids
-                if graph_ids is not None
-                else [self.config.graph_id]
-                if self.config.graph_id
-                else []
+                graph_ids if graph_ids is not None else [self.config.graph.id] if self.config.graph.id else []
             )
 
             # Configure the search
@@ -279,11 +269,7 @@ class MCPToolsRegistry:
         try:
             # Use the provided graph_ids or fall back to the default from config if none provided
             effective_graph_ids = (
-                graph_ids
-                if graph_ids is not None
-                else [self.config.graph_id]
-                if self.config.graph_id
-                else []
+                graph_ids if graph_ids is not None else [self.config.graph.id] if self.config.graph.id else []
             )
 
             client = cast(Graphiti, self.graphiti_client)
@@ -397,7 +383,7 @@ class MCPToolsRegistry:
 
         try:
             # Use the provided graph_id or fall back to the default from config
-            effective_graph_id = graph_id if graph_id is not None else self.config.graph_id
+            effective_graph_id = graph_id if graph_id is not None else self.config.graph.id
 
             if not isinstance(effective_graph_id, str):
                 return {"error": "Group ID must be a string"}

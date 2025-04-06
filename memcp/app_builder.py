@@ -2,13 +2,12 @@
 
 from memcp.api.memcp_server import MemCPServer
 from memcp.config import ConfigManager, MCPConfig, MemCPConfig
+from memcp.config.settings import ConfigError, SecurityError
 from memcp.console import DisplayManager, QueueProgressDisplay
 from memcp.core.queue import QueueManager, QueueStatsTracker
 from memcp.llm.llm_factory import LLMClientFactory
 from memcp.utils import get_logger
 from memcp.utils.shutdown import ShutdownManager
-
-import argparse
 
 from graphiti_core.llm_client import LLMClient
 
@@ -42,14 +41,14 @@ class ApplicationBuilder:
         self.logger = get_logger(__name__)
         # Other attributes will be created on demand via properties
 
-    def configure(self, args: argparse.Namespace | None = None) -> None:
-        """Configure the application from command line arguments and config files.
+    def configure(self, config_path: str | None = None) -> None:
+        """Configure the application.
 
         Args:
-            args: Parsed command line arguments (if None, will use sys.argv)
+            config_path: Optional path to TOML config file
         """
-        # Create and configure the config manager using the provided args
-        self._config_manager = ConfigManager.create_default(args)
+        # Create and configure the config manager
+        self._config_manager = ConfigManager.create_default(config_path)
 
         # Create the configuration objects
         self._memcp_config = self._config_manager.create_memcp_config()
@@ -87,9 +86,8 @@ class ApplicationBuilder:
     def llm_client(self) -> LLMClient:
         """Get the LLM client, creating it if necessary."""
         if not hasattr(self, "_llm_client"):
-            api_key = MemCPConfig.get_openai_api_key()
             self._llm_client = self.llm_factory.create_openai_client(
-                api_key=api_key, model=self.memcp_config.model_name
+                api_key=self.memcp_config.openai.api_key, model=self.memcp_config.model.name
             )
         return self._llm_client
 
@@ -157,13 +155,68 @@ class ApplicationBuilder:
         return server
 
 
-async def create_server() -> MemCPServer:
-    """Create a fully configured MemCPServer instance.
+async def create_server(config_path: str | None = None) -> MemCPServer:
+    """Create the MemCP server with all dependencies.
+
+    Args:
+        config_path: Optional path to TOML config file
 
     Returns:
-        MemCPServer: Configured MemCPServer
+        Configured MemCP server
     """
-    builder = ApplicationBuilder()
-    builder.configure()
-    server = await builder.build()
-    return server
+    logger = get_logger(__name__)
+
+    try:
+        # Load configuration
+        config_manager = ConfigManager(toml_path=config_path)
+        config = config_manager.create_memcp_config()
+        mcp_config = config_manager.create_mcp_config()
+
+        # Create display manager
+        shutdown_manager = ShutdownManager()
+        display_manager = DisplayManager()
+
+        # Create the server
+        server = MemCPServer(
+            graphiti_config=config,
+            mcp_config=mcp_config,
+            display_manager=display_manager,
+            shutdown_manager=shutdown_manager,
+            logger=logger,
+        )
+
+        # Initialize queue components
+        queue_stats_tracker = QueueStatsTracker()
+        queue_manager = QueueManager(queue_stats_tracker)
+        queue_progress_display = QueueProgressDisplay(
+            display_manager.get_main_console(),
+            queue_stats_tracker,
+        )
+        server.initialize_queue_components(
+            queue_stats_tracker=queue_stats_tracker,
+            queue_manager=queue_manager,
+            queue_progress_display=queue_progress_display,
+        )
+
+        # Create LLM client
+        llm_client = LLMClientFactory.create_openai_client(
+            api_key=config.openai.api_key,
+            model=config.model.name,
+        )
+
+        # Initialize Graphiti
+        await server.initialize_graphiti(llm_client, config.destroy_graph)
+
+        # Initialize MCP
+        server.initialize_mcp()
+
+        return server
+    except SecurityError as e:
+        logger.error(f"Security error: {str(e)}")
+        raise
+    except ConfigError as e:
+        logger.error(f"Configuration error: {str(e)}")
+        raise
+    except Exception as e:
+        logger.error(f"Error creating server: {str(e)}")
+        raise
