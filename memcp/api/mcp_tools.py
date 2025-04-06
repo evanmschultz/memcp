@@ -1,6 +1,6 @@
 """MCP tools for Graphiti Server."""
 
-from memcp.config.settings import GraphitiConfig
+from memcp.config.settings import MemCPConfig
 from memcp.core.queue import QueueManager
 from memcp.memcp_typings import MEMCP_ENTITIES
 from memcp.models.responses import (
@@ -62,7 +62,7 @@ class MCPToolsRegistry:
         self,
         graphiti_client: Graphiti,
         queue_manager: QueueManager,
-        config: GraphitiConfig,
+        config: MemCPConfig,
     ) -> None:
         """Initialize the MCP tools registry.
 
