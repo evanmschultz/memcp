@@ -185,7 +185,14 @@ class DisplayManager:
             # Always stop the live display
             self.stop_live_display()
 
-    def show_server_info(self, config: ServerConfig, graph_id: str | None, pid: int, neo4j_name: str) -> None:
+    def show_server_info(
+        self,
+        config: ServerConfig,
+        graph_id: str | None,
+        pid: int,
+        neo4j_name: str,
+        model_name: str,
+    ) -> None:
         """Display server information in a panel.
 
         Args:
@@ -193,8 +200,8 @@ class DisplayManager:
             graph_id: Graph ID being used
             pid: Process ID of the server
             neo4j_name: Name of the Neo4j database
+            model_name: Name of the LLM model being used
         """
-        # Create server info table
         server_table = Table(show_header=False, box=box.SIMPLE, expand=False)
         server_table.add_column("Property", style="info")
         server_table.add_column("Value", style="success")
@@ -206,6 +213,8 @@ class DisplayManager:
 
         if config.transport == "sse":
             server_table.add_row("Address", f"{config.host}:{config.port}")
+
+        server_table.add_row("LLM_Model", model_name)
 
         self.main_console.print(
             Panel(

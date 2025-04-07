@@ -2,11 +2,14 @@
 
 from memcp.utils import get_logger
 
+from typing import Any
+
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.llm_client.config import LLMConfig
 from graphiti_core.llm_client.openai_client import OpenAIClient
 
 
+# TODO: Question, should we use kwargs for the create_client methods?
 class LLMClientFactory:
     """Factory for creating LLM clients."""
 
@@ -17,12 +20,16 @@ class LLMClientFactory:
         # "groq": GroqClient,
     }
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the LLM client factory."""
         self.logger = get_logger(__name__)
 
     def create_client(
-        self, provider: str = "openai", api_key: str = "", model: str | None = None, **kwargs
+        self,
+        provider: str = "openai",
+        api_key: str = "",
+        model: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
     ) -> LLMClient:
         """Create an LLM client for the specified provider.
 
@@ -62,7 +69,12 @@ class LLMClientFactory:
         return client_class(config=llm_config)
 
     @classmethod
-    def create_openai_client(cls, api_key: str, model: str | None = None, **kwargs) -> LLMClient:
+    def create_openai_client(
+        cls,
+        api_key: str,
+        model: str | None = None,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> LLMClient:
         """Create an OpenAI LLM client.
 
         Args:

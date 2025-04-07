@@ -160,7 +160,13 @@ class MemCPServer:
 
         # Display the process ID and server info
         pid = os.getpid()
-        self.display_manager.show_server_info(self.config.server, self.config.graph.id, pid, self.config.neo4j.user)
+        self.display_manager.show_server_info(
+            self.config.server,
+            self.config.graph.id,
+            pid,
+            self.config.neo4j.user,
+            self.config.openai.model_name,
+        )
 
         # Run the server
         try:

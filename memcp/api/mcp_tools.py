@@ -33,7 +33,7 @@ from pydantic import BaseModel
 logger = get_logger(__name__)
 
 
-def format_fact_result(edge: EntityEdge) -> dict[str, Any]:
+def _format_fact_result(edge: EntityEdge) -> dict[str, Any]:
     """Format an entity edge into a readable result.
 
     Since EntityEdge is a Pydantic BaseModel, we can use its built-in serialization capabilities.
@@ -119,10 +119,11 @@ class MCPToolsRegistry:
             async def process_episode() -> None:
                 try:
                     logger.info(
-                        f"Processing queued episode '[highlight]{name}[/highlight]' for graph_id: [highlight]{graph_id_str}[/highlight]"
+                        f"Processing queued episode '[highlight]{name}[/highlight]' for graph_id: [highlight]"
+                        f"{graph_id_str}[/highlight]"
                     )
                     # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
-                    entity_types = MEMCP_ENTITIES if self.config.graph.use_custom_entities else {}
+                    entity_types = MEMCP_ENTITIES if self.config.graph.use_memcp_entities else {}
 
                     # Cast to dict[str, BaseModel] to match the expected type in Graphiti
                     await self.graphiti_client.add_episode(
@@ -144,7 +145,8 @@ class MCPToolsRegistry:
                 except Exception as e:
                     error_msg = str(e)
                     logger.error(
-                        f"[danger]Error[/danger] processing episode '[highlight]{name}[/highlight]' for graph_id [highlight]{graph_id_str}[/highlight]: [danger]{error_msg}[/danger]"
+                        f"[danger]Error[/danger] processing episode '[highlight]{name}[/highlight]' for graph_id "
+                        f"[highlight]{graph_id_str}[/highlight]: [danger]{error_msg}[/danger]"
                     )
 
             # Enqueue the task for processing
@@ -157,7 +159,8 @@ class MCPToolsRegistry:
                 queue_size = self.queue_manager.episode_queues[graph_id_str].qsize()
 
             return {
-                "message": f"Episode '[highlight]{name}[/highlight]' queued for processing (position: [highlight]{queue_size}[/highlight])"
+                "message": f"Episode '[highlight]{name}[/highlight]' queued for processing (position: "
+                f"[highlight]{queue_size}[/highlight])"
             }
         except Exception as e:
             error_msg = str(e)
@@ -201,8 +204,8 @@ class MCPToolsRegistry:
             if entity != "":
                 filters.node_labels = [entity]
 
-            # Perform the search using the _search method
-            search_results = await self.graphiti_client._search(
+            # the _search method is defined by the Graphiti library and is not private despite the leading underscore
+            search_results = await self.graphiti_client._search(  # type: ignore
                 query=query,
                 config=search_config,
                 group_ids=effective_graph_ids,
@@ -267,7 +270,7 @@ class MCPToolsRegistry:
             if not relevant_edges:
                 return {"message": "No relevant facts found", "facts": []}
 
-            facts = [format_fact_result(edge) for edge in relevant_edges]
+            facts = [_format_fact_result(edge) for edge in relevant_edges]
             return {"message": "Facts retrieved successfully", "facts": facts}
         except Exception as e:
             error_msg = str(e)
@@ -327,8 +330,8 @@ class MCPToolsRegistry:
             # Get the entity edge directly using the EntityEdge class method
             entity_edge = await EntityEdge.get_by_uuid(self.graphiti_client.driver, uuid)
 
-            # Use the format_fact_result function to serialize the edge
-            return format_fact_result(entity_edge)
+            # Use the _format_fact_result function to serialize the edge
+            return _format_fact_result(entity_edge)
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Error getting entity edge: {error_msg}")

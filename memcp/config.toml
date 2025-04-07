@@ -1,6 +1,8 @@
 # MemCP Configuration File (example.config.toml)
 # Copy this file to config.toml and customize as needed
 
+
+# fill in all of the defaults from settings.py
 [neo4j]
     uri  = "bolt://localhost:7687"
     user = "neo4j"
@@ -10,16 +12,18 @@
     # DO NOT set api_key here - use environment variables!
     # Optional, set if using a custom OpenAI endpoint
     # base_url = "https://api.example.com"  
-
-[model]
-    name = "gpt-4o-mini"
+    model_name = "gpt-4o-mini"
 
 [graph]
     # If not specified, a random ID will be generated
     # id = "my-graph-id"
-    use_custom_entities = false
+    use_memcp_entities = false
 
 [server]
     host      = "127.0.0.1"
     port      = 8000
     transport = "sse"
+
+[mcp]
+    instructions = "memcp/instructions/mcp_instructions.py"
+    name         = "memcp"

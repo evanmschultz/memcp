@@ -1,21 +1,20 @@
 """Configuration settings for MemCP."""
 
+# TODO: add customizable config path logic
+# TODO: find a less hacky way to handle default values from config files and not need to pass each arg in the cli
+
+from memcp.config.sources import DEFAULT_CONFIG_PATH, TomlConfigSettingsSource
 from memcp.templates.instructions.mcp_instructions import GraphitiInstructions
 
 import logging
-from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
-import tomli
-from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, CliSuppress, SettingsConfigDict
+from pydantic import Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, CliSuppress, PydanticBaseSettingsSource, SettingsConfigDict
 from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-# Compute the default config path relative to this module's location
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.toml"
 
 
 class ConfigError(Exception):
@@ -37,15 +36,15 @@ class MissingCredentialsError(ConfigError):
 
 
 class Neo4jConfig(BaseSettings):
-    """Neo4j database connection settings."""
+    """Neo4j database connection configuration."""
 
     model_config = SettingsConfigDict(
         env_prefix="NEO4J_",
         case_sensitive=False,
     )
 
-    uri: str = Field("bolt://localhost:7687", description="Neo4j URI")
-    user: str = Field("neo4j", description="Neo4j user")
+    uri: str = Field(None, description="Neo4j URI. Config defaults to 'bolt://localhost:7687'.")  # type: ignore
+    user: str = Field(None, description="Neo4j user. Config defaults to 'neo4j'.")  # type: ignore
     password: CliSuppress[SecretStr] = Field(..., description="Neo4j password", exclude=True)
 
 
@@ -58,29 +57,44 @@ class OpenAIConfig(BaseSettings):
     )
 
     api_key: CliSuppress[SecretStr] = Field(..., description="OpenAI API key", exclude=True)
-    model_name: str = Field("gpt-4o-mini", description="OpenAI model name")
+    model_name: str = Field(None, description="OpenAI model name. Config defaults to 'gpt-4o-mini'.")  # type: ignore
     base_url: str | None = Field(None, description="OpenAI API base URL")
 
 
 class GraphConfig(BaseSettings):
     """Graph configuration settings."""
 
-    id: str | None = Field(None, description="Graph ID")
-    use_custom_entities: bool = Field(False, description="Enable entity extraction using predefined entities")
+    model_config = SettingsConfigDict(
+        extra="allow",
+        cli_implicit_flags=True,
+    )
+
+    id: str | None = Field(
+        None, description="Name of the graph to be used by the DB. If None, a random ID will be generated."
+    )
+    use_memcp_entities: bool = Field(
+        None,
+        description="Enable entity extraction using memcp-defined, not graphiti-default entities. "
+        "Config defaults to 'False'.",
+    )  # type: ignore
 
 
 class ServerConfig(BaseSettings):
     """Server configuration settings."""
 
-    transport: Literal["sse", "stdio"] = Field("sse", description="Transport type (sse or stdio)")
-    host: str = Field("127.0.0.1", description="Host address for the server")
-    port: int = Field(8000, description="Port number for the server")
+    transport: Literal["sse", "stdio"] = Field(
+        "sse", description="Transport type (sse or stdio). Config defaults to 'sse'."
+    )
+    host: str = Field(None, description="Host address for the server. Config defaults to '127.0.0.1'.")  # type: ignore
+    port: int = Field(None, description="Port number for the server. Config defaults to '8000'.")  # type: ignore
 
 
 class MCPConfig(BaseSettings):
     """MCP server configuration settings."""
 
-    name: str = Field("memcp", description="Name of the MCP server to be used by the client")
+    name: str | None = Field(
+        None, description="Name of the MCP server to be used by the client. Config defaults to 'memcp'."
+    )
     instructions: CliSuppress[str] = Field(
         default=GraphitiInstructions.DEFAULT_MCP_INSTRUCTIONS,
         description="Instructions for the MCP server",
@@ -96,21 +110,28 @@ class MemCPConfig(BaseSettings):
 
     Centralizes all configuration parameters for the MemCP server,
     including database connection details and LLM settings.
+
+    Note:
+        Update the configuration file in the project directory to ease repetted settings.
     """
 
     model_config = SettingsConfigDict(
         case_sensitive=False,
         extra="ignore",
         env_nested_delimiter="__",
+        cli_implicit_flags=True,
+        cli_use_class_docs_for_groups=True,
+        toml_file=DEFAULT_CONFIG_PATH,
     )
 
     # make the cofig path a Path object that validates the input string is a valid path object and the file exists
-    config_path: Path = Field(
-        DEFAULT_CONFIG_PATH,
-        description="Path to TOML configuration file. Does not need the .toml extension.",
-    )
+    # config_path: Path = Field(
+    #     DEFAULT_CONFIG_PATH,
+    #     description="Path to TOML configuration file. Does not need the .toml extension.",
+    # )
 
-    # TODO: fix default factory based type errors and remove the `type: ignore`
+    # TODO: fix default factory based type errors and remove the `type: ignore`,
+    # code works but pyright complains
     neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)  # type: ignore
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)  # type: ignore
     graph: GraphConfig = Field(default_factory=GraphConfig)  # type: ignore
@@ -118,28 +139,28 @@ class MemCPConfig(BaseSettings):
     mcp: MCPConfig = Field(default_factory=MCPConfig)  # type: ignore
     destroy_graph: bool = Field(False, description="Destroy all graphs")
 
-    @field_validator("config_path")
-    @classmethod
-    def validate_config_path(cls, v: Path | str) -> Path:
-        """Validate that the config file exists and is a valid path."""
-        # Convert to Path object
-        path = Path(v) if isinstance(v, str) else v
+    # @field_validator("config_path")
+    # @classmethod
+    # def validate_config_path(cls, v: Path | str) -> Path:
+    #     """Validate that the config file exists and is a valid path."""
+    #     # Convert to Path object
+    #     path = Path(v) if isinstance(v, str) else v
 
-        # Try exact path first
-        if path.exists() and path.is_file():
-            return path.resolve()
+    #     # Try exact path first
+    #     if path.exists() and path.is_file():
+    #         return path.resolve()
 
-        # If path doesn't exist and doesn't end with .toml, try with .toml
-        if not str(path).endswith(".toml"):
-            path_with_toml = Path(f"{path}.toml")
-            if path_with_toml.exists() and path_with_toml.is_file():
-                return path_with_toml.resolve()
+    #     # If path doesn't exist and doesn't end with .toml, try with .toml
+    #     if not str(path).endswith(".toml"):
+    #         path_with_toml = Path(f"{path}.toml")
+    #         if path_with_toml.exists() and path_with_toml.is_file():
+    #             return path_with_toml.resolve()
 
-        # Neither path worked, provide helpful error
-        if not str(path).endswith(".toml"):
-            raise ValueError(f"Configuration file not found at either {path} or {path}.toml")
-        else:
-            raise ValueError(f"Configuration file not found at {path}")
+    #     # Neither path worked, provide helpful error
+    #     if not str(path).endswith(".toml"):
+    #         raise ValueError(f"Configuration file not found at either {path} or {path}.toml")
+    #     else:
+    #         raise ValueError(f"Configuration file not found at {path}")
 
     @model_validator(mode="after")
     def validate_credentials(self) -> Self:
@@ -158,60 +179,25 @@ class MemCPConfig(BaseSettings):
                 "variable with your Neo4j password."
             )
 
-        # If config_path is specified, validate it doesn't contain secrets
-        if self.config_path:
-            logger.debug(f"Validating configuration file: {self.config_path}")
-            self._validate_toml_file_security(self.config_path)
-
         return self
 
-    def _validate_toml_file_security(self, file_path: Path | str) -> None:
-        """Validate that the TOML file doesn't contain sensitive information.
-
-        Args:
-            file_path: Path to the TOML file (can be string or Path object)
-
-        Raises:
-            SecurityError: If the TOML file contains sensitive information
-        """
-        logger = logging.getLogger(__name__)
-
-        try:
-            with open(file_path, "rb") as f:
-                config = tomli.load(f)
-
-            logger.debug("Validating TOML configuration for security issues")
-
-            # Check for OpenAI API key
-            if "openai" in config:
-                openai_config: dict[str, Any] = config["openai"]
-                if "api_key" in openai_config:
-                    api_key = str(openai_config["api_key"])
-                    if api_key and len(api_key) > 0:
-                        raise SecurityError(
-                            "SECURITY ERROR: TOML file contains OpenAI API key. "
-                            "Please use the OPENAI_API_KEY environment variable instead. "
-                            "NEVER store API keys in configuration files."
-                        )
-
-            # Check for Neo4j password
-            if "neo4j" in config:
-                neo4j_config: dict[str, Any] = config["neo4j"]
-                if "password" in neo4j_config:
-                    password = str(neo4j_config["password"])
-                    if password and len(password) > 0:
-                        raise SecurityError(
-                            "SECURITY ERROR: TOML file contains Neo4j password. "
-                            "Please use the NEO4J_PASSWORD environment variable instead. "
-                            "NEVER store passwords in configuration files."
-                        )
-
-        except FileNotFoundError:
-            logger.warning(f"Configuration file not found: {file_path}")
-            return
-        except tomli.TOMLDecodeError as e:
-            logger.error(f"Invalid TOML configuration file: {e}")
-            raise ConfigError(f"The configuration file {file_path} is not valid TOML: {e}") from e
-        except ValueError:
-            # Re-raise security errors
-            raise
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Customise the sources for the settings."""
+        # Define the sources and their priority (earlier sources take precedence)
+        # The order is important here: CLI args (init_settings) overrides TOML config
+        print("Customizing settings sources with TOML file")
+        return (
+            init_settings,  # First priority - CLI arguments
+            TomlConfigSettingsSource(settings_cls),  # Second priority - TOML config file
+            env_settings,  # Third priority - Environment variables
+            dotenv_settings,  # Fourth priority - .env file
+            file_secret_settings,  # Fifth priority - Secrets
+        )
