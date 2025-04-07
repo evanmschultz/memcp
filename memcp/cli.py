@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Command-line interface for MemCP."""
 
-from memcp.app_builder import create_server
-from memcp.config.settings import ConfigError, MemCPConfig, MissingCredentialsError, SecurityError
+from memcp.api.memcp_server import MemCPServer
+from memcp.config import ConfigError, MemCPConfig, MissingCredentialsError, SecurityError
+from memcp.console import DisplayManager, QueueProgressDisplay
+from memcp.core.queue import QueueManager, QueueStatsTracker
+from memcp.llm.llm_factory import LLMClientFactory
 from memcp.utils import configure_logging, get_logger
+from memcp.utils.shutdown import ShutdownManager
 
 import asyncio
 import sys
@@ -32,16 +36,75 @@ configure_logging()
 logger = get_logger(__name__)
 
 
-async def run_server(config_path: str | None = None) -> None:
+async def create_server(config: MemCPConfig) -> MemCPServer:
+    """Create the MemCP server with all dependencies.
+
+    Args:
+        config (MemCPConfig): The MemCP configuration object
+
+    Returns:
+        Configured MemCP server
+    """
+    try:
+        # Create display manager
+        shutdown_manager = ShutdownManager()
+        display_manager = DisplayManager()
+
+        # Create the server
+        server = MemCPServer(
+            config=config,
+            display_manager=display_manager,
+            shutdown_manager=shutdown_manager,
+            logger=logger,
+        )
+
+        # Initialize queue components
+        queue_stats_tracker = QueueStatsTracker()
+        queue_manager = QueueManager(queue_stats_tracker)
+        queue_progress_display = QueueProgressDisplay(
+            display_manager.get_main_console(),
+            queue_stats_tracker,
+        )
+        server.initialize_queue_components(
+            queue_stats_tracker=queue_stats_tracker,
+            queue_manager=queue_manager,
+            queue_progress_display=queue_progress_display,
+        )
+
+        # Create LLM client
+        llm_client = LLMClientFactory.create_openai_client(
+            api_key=config.openai.api_key.get_secret_value(),
+            model=config.openai.model_name,
+        )
+
+        # Initialize Graphiti
+        await server.initialize_graphiti(llm_client, config.destroy_graph)
+
+        # Initialize MCP
+        server.initialize_mcp()
+
+        return server
+    except SecurityError as e:
+        logger.error(f"Security error: {str(e)}")
+        raise
+    except ConfigError as e:
+        logger.error(f"Configuration error: {str(e)}")
+        raise
+    except Exception as e:
+        logger.error(f"Error creating server: {str(e)}")
+        raise
+
+
+async def run_server(config: MemCPConfig) -> None:
     """Create and run the MemCP server asynchronously.
 
     Args:
-        config_path: Optional path to TOML config file
+        config (MemCPConfig): The MemCP configuration object
     """
     console = Console()
 
     try:
-        server = await create_server(config_path)
+        server = await create_server(config)
         await server.run()
     except SecurityError as e:
         console.print(Panel(f"[bold red]Security Error:[/] {str(e)}", title="Security Error", border_style="red"))
@@ -71,11 +134,8 @@ def main() -> None:
         # Use CliApp to get configuration
         config = CliApp.run(MemCPConfig)
 
-        # Get TOML config path if specified
-        toml_path = config.config_path
-
         # Run the server with the configuration
-        asyncio.run(run_server(toml_path))
+        asyncio.run(run_server(config))
     except Exception as e:
         # Handle any unexpected errors during startup
         console = Console()
