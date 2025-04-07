@@ -1,5 +1,7 @@
 """Settings source for loading configuration values from a TOML file."""
 
+from memcp.utils.errors import ConfigMissingError
+
 from pathlib import Path
 from typing import Any
 
@@ -11,19 +13,6 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 
 # Compute the default config path relative to this module's location
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.toml"
-
-
-class ConfigMissingError(Exception):
-    """Exception raised when a configuration file is missing."""
-
-    def __init__(self, config_path: Path) -> None:
-        """Initialize the ConfigMissingError.
-
-        Args:
-            config_path: The path to the configuration file
-        """
-        self.config_path = config_path
-        super().__init__(f"Configuration file not found at: {config_path}")
 
 
 class TomlConfigSettingsSource(PydanticBaseSettingsSource):

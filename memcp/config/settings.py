@@ -5,6 +5,7 @@
 
 from memcp.config.sources import DEFAULT_CONFIG_PATH, TomlConfigSettingsSource
 from memcp.templates.instructions.mcp_instructions import GraphitiInstructions
+from memcp.utils.errors import MissingCredentialsError
 
 import logging
 from typing import Literal
@@ -15,24 +16,6 @@ from typing_extensions import Self
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-
-class ConfigError(Exception):
-    """Base exception for configuration errors."""
-
-    pass
-
-
-class SecurityError(ConfigError):
-    """Exception raised for security-related configuration errors."""
-
-    pass
-
-
-class MissingCredentialsError(ConfigError):
-    """Exception raised when required credentials are missing."""
-
-    pass
 
 
 class Neo4jConfig(BaseSettings):

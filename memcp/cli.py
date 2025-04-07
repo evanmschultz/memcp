@@ -2,11 +2,12 @@
 """Command-line interface for MemCP."""
 
 from memcp.api.memcp_server import MemCPServer
-from memcp.config import ConfigError, MemCPConfig, MissingCredentialsError, SecurityError
+from memcp.config import MemCPConfig, MissingCredentialsError
 from memcp.console import DisplayManager, QueueProgressDisplay
 from memcp.core.queue import QueueManager, QueueStatsTracker
 from memcp.llm.llm_factory import LLMClientFactory
 from memcp.utils import configure_logging, get_logger
+from memcp.utils.errors import ConfigError
 from memcp.utils.shutdown import ShutdownManager
 
 import asyncio
@@ -84,9 +85,6 @@ async def create_server(config: MemCPConfig) -> MemCPServer:
         server.initialize_mcp()
 
         return server
-    except SecurityError as e:
-        logger.error(f"Security error: {str(e)}")
-        raise
     except ConfigError as e:
         logger.error(f"Configuration error: {str(e)}")
         raise
@@ -106,10 +104,6 @@ async def run_server(config: MemCPConfig) -> None:
     try:
         server = await create_server(config)
         await server.run()
-    except SecurityError as e:
-        console.print(Panel(f"[bold red]Security Error:[/] {str(e)}", title="Security Error", border_style="red"))
-        logger.error(f"Security error: {str(e)}")
-        sys.exit(1)
     except MissingCredentialsError as e:
         console.print(
             Panel(f"[bold yellow]Missing Credentials:[/] {str(e)}", title="Configuration Error", border_style="yellow")
