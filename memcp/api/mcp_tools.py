@@ -26,6 +26,7 @@ from graphiti_core.search.search_config_recipes import (
 )
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
+from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
 # Get a logger for this module
@@ -71,9 +72,9 @@ class MCPToolsRegistry:
             queue_manager: Queue manager for processing tasks
             config: Configuration settings
         """
-        self.graphiti_client = graphiti_client
-        self.queue_manager = queue_manager
-        self.config = config
+        self.graphiti_client: Graphiti = graphiti_client
+        self.queue_manager: QueueManager = queue_manager
+        self.config: MemCPConfig = config
 
     async def add_episode(
         self,
@@ -100,12 +101,6 @@ class MCPToolsRegistry:
         Returns:
             SuccessResponse or ErrorResponse
         """
-        if self.graphiti_client is None:
-            return {"error": "Graphiti client not initialized"}
-
-        if self.queue_manager is None:
-            return {"error": "Queue manager not initialized"}
-
         try:
             # Map string source to EpisodeType enum
             source_type = EpisodeType.text
@@ -120,8 +115,6 @@ class MCPToolsRegistry:
             # Cast graph_id to str to satisfy type checker
             graph_id_str = str(effective_graph_id) if effective_graph_id is not None else ""
 
-            client = cast(Graphiti, self.graphiti_client)
-
             # Define the episode processing function
             async def process_episode() -> None:
                 try:
@@ -132,7 +125,7 @@ class MCPToolsRegistry:
                     entity_types = MEMCP_ENTITIES if self.config.graph.use_custom_entities else {}
 
                     # Cast to dict[str, BaseModel] to match the expected type in Graphiti
-                    await client.add_episode(
+                    await self.graphiti_client.add_episode(
                         name=name,
                         episode_body=episode_body,
                         source=source_type,
@@ -145,7 +138,7 @@ class MCPToolsRegistry:
                     logger.info(f"Episode '[highlight]{name}[/highlight]' [success]added successfully[/success]")
 
                     logger.info(f"Building communities after episode '[highlight]{name}[/highlight]'")
-                    await client.build_communities()
+                    await self.graphiti_client.build_communities()
 
                     logger.info(f"Episode '[highlight]{name}[/highlight]' [success]processed successfully[/success]")
                 except Exception as e:
@@ -191,9 +184,6 @@ class MCPToolsRegistry:
         Returns:
             NodeSearchResponse or ErrorResponse
         """
-        if self.graphiti_client is None:
-            return ErrorResponse(error="Graphiti client not initialized")
-
         try:
             # Use the provided graph_ids or fall back to the default from config if none provided
             effective_graph_ids = (
@@ -211,10 +201,8 @@ class MCPToolsRegistry:
             if entity != "":
                 filters.node_labels = [entity]
 
-            client = cast(Graphiti, self.graphiti_client)
-
             # Perform the search using the _search method
-            search_results = await client._search(
+            search_results = await self.graphiti_client._search(
                 query=query,
                 config=search_config,
                 group_ids=effective_graph_ids,
@@ -263,18 +251,13 @@ class MCPToolsRegistry:
         Returns:
             FactSearchResponse or ErrorResponse
         """
-        if self.graphiti_client is None:
-            return {"error": "Graphiti client not initialized"}
-
         try:
             # Use the provided graph_ids or fall back to the default from config if none provided
             effective_graph_ids = (
                 graph_ids if graph_ids is not None else [self.config.graph.id] if self.config.graph.id else []
             )
 
-            client = cast(Graphiti, self.graphiti_client)
-
-            relevant_edges = await client.search(
+            relevant_edges = await self.graphiti_client.search(
                 group_ids=effective_graph_ids,
                 query=query,
                 num_results=max_facts,
@@ -300,16 +283,11 @@ class MCPToolsRegistry:
         Returns:
             SuccessResponse or ErrorResponse
         """
-        if self.graphiti_client is None:
-            return {"error": "Graphiti client not initialized"}
-
         try:
-            client = cast(Graphiti, self.graphiti_client)
-
             # Get the entity edge by UUID
-            entity_edge = await EntityEdge.get_by_uuid(client.driver, uuid)
+            entity_edge = await EntityEdge.get_by_uuid(self.graphiti_client.driver, uuid)
             # Delete the edge using its delete method
-            await entity_edge.delete(client.driver)
+            await entity_edge.delete(self.graphiti_client.driver)
             return {"message": f"Entity edge with UUID {uuid} deleted successfully"}
         except Exception as e:
             error_msg = str(e)
@@ -325,16 +303,11 @@ class MCPToolsRegistry:
         Returns:
             SuccessResponse or ErrorResponse
         """
-        if self.graphiti_client is None:
-            return {"error": "Graphiti client not initialized"}
-
         try:
-            client = cast(Graphiti, self.graphiti_client)
-
             # Get the episodic node by UUID
-            episodic_node = await EpisodicNode.get_by_uuid(client.driver, uuid)
+            episodic_node = await EpisodicNode.get_by_uuid(self.graphiti_client.driver, uuid)
             # Delete the node using its delete method
-            await episodic_node.delete(client.driver)
+            await episodic_node.delete(self.graphiti_client.driver)
             return {"message": f"Episode with UUID {uuid} deleted successfully"}
         except Exception as e:
             error_msg = str(e)
@@ -350,14 +323,9 @@ class MCPToolsRegistry:
         Returns:
             Entity edge data or ErrorResponse
         """
-        if self.graphiti_client is None:
-            return {"error": "Graphiti client not initialized"}
-
         try:
-            client = cast(Graphiti, self.graphiti_client)
-
             # Get the entity edge directly using the EntityEdge class method
-            entity_edge = await EntityEdge.get_by_uuid(client.driver, uuid)
+            entity_edge = await EntityEdge.get_by_uuid(self.graphiti_client.driver, uuid)
 
             # Use the format_fact_result function to serialize the edge
             return format_fact_result(entity_edge)
@@ -378,9 +346,6 @@ class MCPToolsRegistry:
         Returns:
             List of episodes or ErrorResponse
         """
-        if self.graphiti_client is None:
-            return {"error": "Graphiti client not initialized"}
-
         try:
             # Use the provided graph_id or fall back to the default from config
             effective_graph_id = graph_id if graph_id is not None else self.config.graph.id
@@ -388,9 +353,7 @@ class MCPToolsRegistry:
             if not isinstance(effective_graph_id, str):
                 return {"error": "Group ID must be a string"}
 
-            client = cast(Graphiti, self.graphiti_client)
-
-            episodes = await client.retrieve_episodes(
+            episodes = await self.graphiti_client.retrieve_episodes(
                 group_ids=[effective_graph_id],
                 last_n=last_n,
                 reference_time=datetime.now(timezone.utc),
@@ -417,14 +380,9 @@ class MCPToolsRegistry:
         Returns:
             SuccessResponse or ErrorResponse
         """
-        if self.graphiti_client is None:
-            return {"error": "Graphiti client not initialized"}
-
         try:
-            client = cast(Graphiti, self.graphiti_client)
-
-            await clear_data(client.driver)
-            await client.build_indices_and_constraints()
+            await clear_data(self.graphiti_client.driver)
+            await self.graphiti_client.build_indices_and_constraints()
             return {"message": "Graph cleared successfully and indices rebuilt"}
         except Exception as e:
             error_msg = str(e)
@@ -437,14 +395,9 @@ class MCPToolsRegistry:
         Returns:
             StatusResponse with status information
         """
-        if self.graphiti_client is None:
-            return {"status": "error", "message": "Graphiti client not initialized"}
-
         try:
-            client = cast(Graphiti, self.graphiti_client)
-
             # Test Neo4j connection
-            await client.driver.verify_connectivity()
+            await self.graphiti_client.driver.verify_connectivity()
             return {
                 "status": "ok",
                 "message": "Graphiti MCP server is running and connected to Neo4j",
@@ -458,7 +411,7 @@ class MCPToolsRegistry:
             }
 
 
-def register_tools(mcp_server, tools_registry: MCPToolsRegistry) -> None:
+def register_tools(mcp_server: FastMCP, tools_registry: MCPToolsRegistry) -> None:
     """Register all MCP tools with the MCP server.
 
     Args:

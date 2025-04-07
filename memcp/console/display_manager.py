@@ -1,6 +1,6 @@
 """Display management utilities for MemCP."""
 
-from memcp.config.settings import MCPConfig
+from memcp.config.settings import ServerConfig
 from memcp.console.queue_display import QueueProgressDisplay
 from memcp.utils.memcp_rich_theme import GRAPHITI_THEME
 
@@ -59,11 +59,11 @@ class DisplayManager:
         """
         return self.progress_console
 
-    def create_status_display(self, config: MCPConfig) -> Status:
+    def create_status_display(self, config: ServerConfig) -> Status:
         """Create a status object based on MCP configuration.
 
         Args:
-            config: MCP configuration
+            config: Server configuration
 
         Returns:
             Rich Status object
@@ -185,13 +185,14 @@ class DisplayManager:
             # Always stop the live display
             self.stop_live_display()
 
-    def show_server_info(self, config: MCPConfig, graph_id: str | None, pid: int) -> None:
+    def show_server_info(self, config: ServerConfig, graph_id: str | None, pid: int, neo4j_name: str) -> None:
         """Display server information in a panel.
 
         Args:
-            config: MCP server configuration
+            config: Server configuration
             graph_id: Graph ID being used
             pid: Process ID of the server
+            neo4j_name: Name of the Neo4j database
         """
         # Create server info table
         server_table = Table(show_header=False, box=box.SIMPLE, expand=False)
@@ -199,8 +200,9 @@ class DisplayManager:
         server_table.add_column("Value", style="success")
         server_table.add_row("Status", "Running")
         server_table.add_row("PID", str(pid))
+        server_table.add_row("Neo4j_Name", neo4j_name)
         server_table.add_row("Transport", config.transport)
-        server_table.add_row("Graph ID", graph_id or "None")
+        server_table.add_row("Graph_ID", graph_id or "None")
 
         if config.transport == "sse":
             server_table.add_row("Address", f"{config.host}:{config.port}")

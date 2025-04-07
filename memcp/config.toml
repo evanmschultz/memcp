@@ -5,11 +5,9 @@
     uri  = "bolt://localhost:7687"
     user = "neo4j"
     # DO NOT set password here - use environment variables!
-    # password = ""
 
 [openai]
     # DO NOT set api_key here - use environment variables!
-    # api_key = ""
     # Optional, set if using a custom OpenAI endpoint
     # base_url = "https://api.example.com"  
 

@@ -1,7 +1,7 @@
 """Application builder for creating and configuring the application components."""
 
 from memcp.api.memcp_server import MemCPServer
-from memcp.config import ConfigManager, MCPConfig, MemCPConfig
+from memcp.config import ConfigManager, MemCPConfig
 from memcp.config.settings import ConfigError, SecurityError
 from memcp.console import DisplayManager, QueueProgressDisplay
 from memcp.core.queue import QueueManager, QueueStatsTracker
@@ -52,7 +52,7 @@ class ApplicationBuilder:
 
         # Create the configuration objects
         self._memcp_config = self._config_manager.create_memcp_config()
-        self._mcp_config = self._config_manager.create_mcp_config()
+        # self._mcp_config = self._config_manager.create_mcp_config()
 
     @property
     def config_manager(self) -> ConfigManager:
@@ -69,13 +69,6 @@ class ApplicationBuilder:
         return self._memcp_config
 
     @property
-    def mcp_config(self) -> MCPConfig:
-        """Get the MCP configuration, creating it if necessary."""
-        if not hasattr(self, "_mcp_config"):
-            self.configure()
-        return self._mcp_config
-
-    @property
     def llm_factory(self) -> LLMClientFactory:
         """Get the LLM factory, creating it if necessary."""
         if not hasattr(self, "_llm_factory"):
@@ -87,7 +80,7 @@ class ApplicationBuilder:
         """Get the LLM client, creating it if necessary."""
         if not hasattr(self, "_llm_client"):
             self._llm_client = self.llm_factory.create_openai_client(
-                api_key=self.memcp_config.openai.api_key, model=self.memcp_config.model.name
+                api_key=self.memcp_config.openai.api_key.get_secret_value(), model=self.memcp_config.openai.model_name
             )
         return self._llm_client
 
@@ -136,8 +129,7 @@ class ApplicationBuilder:
             MemCPServer: Configured MemCPServer
         """
         server = MemCPServer(
-            graphiti_config=self.memcp_config,
-            mcp_config=self.mcp_config,
+            config=self.memcp_config,
             display_manager=self.display_manager,
             shutdown_manager=self.shutdown_manager,
             logger=self.logger,
@@ -170,7 +162,6 @@ async def create_server(config_path: str | None = None) -> MemCPServer:
         # Load configuration
         config_manager = ConfigManager(toml_path=config_path)
         config = config_manager.create_memcp_config()
-        mcp_config = config_manager.create_mcp_config()
 
         # Create display manager
         shutdown_manager = ShutdownManager()
@@ -178,8 +169,7 @@ async def create_server(config_path: str | None = None) -> MemCPServer:
 
         # Create the server
         server = MemCPServer(
-            graphiti_config=config,
-            mcp_config=mcp_config,
+            config=config,
             display_manager=display_manager,
             shutdown_manager=shutdown_manager,
             logger=logger,
@@ -200,8 +190,8 @@ async def create_server(config_path: str | None = None) -> MemCPServer:
 
         # Create LLM client
         llm_client = LLMClientFactory.create_openai_client(
-            api_key=config.openai.api_key,
-            model=config.model.name,
+            api_key=config.openai.api_key.get_secret_value(),
+            model=config.openai.model_name,
         )
 
         # Initialize Graphiti

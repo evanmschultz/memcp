@@ -131,7 +131,7 @@ class QueueStatsTracker:
         }
 
         # Calculate in_progress and failed counts
-        processing_times = []
+        processing_times: list[float] = []
         for stats in self.queue_stats.values():
             totals["in_progress"] += stats["in_progress"]
             totals["failed"] += stats["failed"]

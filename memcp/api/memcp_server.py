@@ -1,11 +1,10 @@
 """Graphiti MCP Server implementation."""
 
 from memcp.api.mcp_tools import MCPToolsRegistry, register_tools
-from memcp.config.settings import MCPConfig, MemCPConfig
+from memcp.config.settings import MemCPConfig
 from memcp.console.display_manager import DisplayManager
 from memcp.console.queue_display import QueueProgressDisplay
 from memcp.core.queue import QueueManager, QueueStatsTracker
-from memcp.templates.instructions.mcp_instructions import GraphitiInstructions
 from memcp.utils.shutdown import ShutdownManager
 
 import asyncio
@@ -27,8 +26,7 @@ class MemCPServer:
 
     def __init__(
         self,
-        graphiti_config: MemCPConfig,
-        mcp_config: MCPConfig,
+        config: MemCPConfig,
         display_manager: DisplayManager,
         shutdown_manager: ShutdownManager,
         logger: Logger,
@@ -36,14 +34,12 @@ class MemCPServer:
         """Initialize the server with all dependencies.
 
         Args:
-            graphiti_config: Configuration for Graphiti
-            mcp_config: Configuration for MCP server
+            config: Configuration for MemCP
             display_manager: Manager for console displays
             shutdown_manager: Manager for shutdown operations
             logger: Logger instance
         """
-        self.graphiti_config = graphiti_config
-        self.mcp_config = mcp_config
+        self.config = config
         self.display_manager = display_manager
         self.shutdown_manager = shutdown_manager
         self.logger = logger
@@ -63,17 +59,13 @@ class MemCPServer:
             llm_client: LLMClient for LLM operations
             destroy_graph: Whether to destroy existing graphs
         """
-        if (
-            not self.graphiti_config.neo4j.uri
-            or not self.graphiti_config.neo4j.user
-            or not self.graphiti_config.neo4j.password
-        ):
+        if not self.config.neo4j.uri or not self.config.neo4j.user or not self.config.neo4j.password:
             raise ValueError("NEO4J_URI, NEO4J_USER, and NEO4J_PASSWORD must be set")
 
         self.graphiti_client = Graphiti(
-            uri=self.graphiti_config.neo4j.uri,
-            user=self.graphiti_config.neo4j.user,
-            password=self.graphiti_config.neo4j.password,
+            uri=self.config.neo4j.uri,
+            user=self.config.neo4j.user,
+            password=self.config.neo4j.password.get_secret_value(),
             llm_client=llm_client,
         )
 
@@ -111,16 +103,13 @@ class MemCPServer:
             lambda: self.display_manager.update_display()
         )
 
-    def initialize_mcp(self, mcp_name: str | None = None, mcp_instructions: str | None = None) -> None:
+    def initialize_mcp(self) -> None:
         """Initialize the MCP server instance."""
-        name: str = mcp_name if mcp_name else "graphiti"
-        instructions: str = mcp_instructions if mcp_instructions else GraphitiInstructions.DEFAULT_MCP_INSTRUCTIONS
-
         # Create the MCP server instance
         self.mcp = FastMCP(
-            name,
-            instructions=instructions,
-            settings={"host": self.mcp_config.host, "port": self.mcp_config.port},
+            self.config.mcp.name,
+            instructions=self.config.mcp.instructions,
+            settings={"host": self.config.server.host, "port": self.config.server.port},
         )
 
         # Make sure we have necessary components initialized
@@ -131,7 +120,7 @@ class MemCPServer:
         self.tools_registry = MCPToolsRegistry(
             graphiti_client=self.graphiti_client,
             queue_manager=self.queue_manager,
-            config=self.graphiti_config,
+            config=self.config,
         )
 
         # Register all MCP tools
@@ -139,21 +128,17 @@ class MemCPServer:
 
         self.logger.info("MCP server initialized and tools registered successfully")
 
-    async def _run_mcp_server(self, transport: str) -> None:
-        """Run the MCP server with the specified transport.
-
-        Args:
-            transport: Transport type ("stdio" or "sse")
-        """
+    async def _run_mcp_server(self) -> None:
+        """Run the MCP server with the specified transport."""
         if not self.mcp:
             raise ValueError("MCP not initialized. Call initialize_mcp first.")
 
-        if transport == "stdio":
+        if self.config.server.transport == "stdio":
             await self.mcp.run_stdio_async()
-        elif transport == "sse":
+        elif self.config.server.transport == "sse":
             await self.mcp.run_sse_async()
         else:
-            raise ValueError(f"Unsupported transport: {transport}")
+            raise ValueError(f"Unsupported transport: {self.config.server.transport}")
 
     async def run(self) -> None:
         """Run the server."""
@@ -175,12 +160,12 @@ class MemCPServer:
 
         # Display the process ID and server info
         pid = os.getpid()
-        self.display_manager.show_server_info(self.mcp_config, self.graphiti_config.graph.id, pid)
+        self.display_manager.show_server_info(self.config.server, self.config.graph.id, pid, self.config.neo4j.user)
 
         # Run the server
         try:
             # Create status object
-            status_obj = self.display_manager.create_status_display(self.mcp_config)
+            status_obj = self.display_manager.create_status_display(self.config.server)
 
             # Ensure we have a queue progress display
             if not self.queue_progress_display:
@@ -190,7 +175,7 @@ class MemCPServer:
             await self.display_manager.run_with_live_display(
                 self.queue_progress_display,
                 status_obj,
-                lambda: self._run_mcp_server(self.mcp_config.transport),
+                lambda: self._run_mcp_server(),  # Fixed: No arguments passed here
             )
 
         except asyncio.CancelledError:

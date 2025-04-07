@@ -5,7 +5,6 @@ from memcp.config.settings import (
     GraphConfig,
     MCPConfig,
     MemCPConfig,
-    ModelConfig,
     Neo4jConfig,
     OpenAIConfig,
     ServerConfig,
@@ -19,5 +18,4 @@ __all__ = [
     "Neo4jConfig",
     "OpenAIConfig",
     "GraphConfig",
-    "ModelConfig",
 ]

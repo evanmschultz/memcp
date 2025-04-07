@@ -72,7 +72,7 @@ def main() -> None:
         config = CliApp.run(MemCPConfig)
 
         # Get TOML config path if specified
-        toml_path = config.config_file
+        toml_path = config.config_path
 
         # Run the server with the configuration
         asyncio.run(run_server(toml_path))
@@ -85,7 +85,3 @@ def main() -> None:
     finally:
         # Restore stderr to its original state (for Rich console)
         sys.stderr = sys.__stderr__
-
-
-if __name__ == "__main__":
-    main()

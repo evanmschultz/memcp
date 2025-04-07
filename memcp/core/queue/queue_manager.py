@@ -5,7 +5,7 @@ from memcp.core.queue.stats import QueueStatsTracker
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from collections.abc import Callable as TypeCallable
 
 # Configure logger
@@ -27,7 +27,7 @@ class QueueManager:
         Args:
             queue_stats_tracker: The stats tracker instance to use
         """
-        self.episode_queues: dict[str, asyncio.Queue] = {}
+        self.episode_queues: dict[str, asyncio.Queue[Callable[[], Awaitable[None]]]] = {}
         self.queue_workers: dict[str, bool] = {}
         self.queue_stats_tracker: QueueStatsTracker = queue_stats_tracker
         self._state_change_callbacks: list[TypeCallable[[], None]] = []
@@ -58,7 +58,7 @@ class QueueManager:
         for callback in self._state_change_callbacks:
             callback()
 
-    async def enqueue_task(self, group_id: str, process_func: Callable) -> None:
+    async def enqueue_task(self, group_id: str, process_func: Callable[[], Awaitable[None]]) -> None:
         """Enqueue a task for processing.
 
         Args:
@@ -93,9 +93,7 @@ class QueueManager:
         if current_task:
             current_task.set_name(f"queue_worker_{group_id}")
 
-        logger.info(
-            f"Starting episode queue worker for group_id: [highlight]{group_id}[/highlight]"
-        )
+        logger.info(f"Starting episode queue worker for group_id: [highlight]{group_id}[/highlight]")
         self.queue_workers[group_id] = True
 
         try:
@@ -135,8 +133,7 @@ class QueueManager:
                     self._notify_state_change()
         except asyncio.CancelledError:
             logger.info(
-                f"Episode queue worker for group_id [highlight]{group_id}[/highlight] was "
-                f"[success]cancelled[/success]"
+                f"Episode queue worker for group_id [highlight]{group_id}[/highlight] was [success]cancelled[/success]"
             )
         except Exception as e:
             logger.error(
@@ -146,8 +143,7 @@ class QueueManager:
         finally:
             self.queue_workers[group_id] = False
             logger.info(
-                f"[success]Stopped[/success] episode queue worker for group_id: "
-                f"[highlight]{group_id}[/highlight]"
+                f"[success]Stopped[/success] episode queue worker for group_id: [highlight]{group_id}[/highlight]"
             )
 
     def cancel_all_workers(self) -> int:
@@ -169,10 +165,7 @@ class QueueManager:
                     self.queue_workers[group_id] = False
 
                 # Log cancellation
-                logger.info(
-                    f"[task]Cancelling queue worker task {task.get_name()} - "
-                    f"[success]Good![/success][/task]"
-                )
+                logger.info(f"[task]Cancelling queue worker task {task.get_name()} - [success]Good![/success][/task]")
 
         # Notify callbacks about state change
         self._notify_state_change()
