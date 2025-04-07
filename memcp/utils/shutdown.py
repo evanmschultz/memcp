@@ -1,5 +1,8 @@
 """Shutdown utilities for MemCP."""
 
+from memcp.console.display_manager import DisplayManager
+from memcp.console.queue_display import QueueProgressDisplay
+from memcp.core.queue import QueueManager
 from memcp.utils.memcp_rich_theme import GRAPHITI_THEME
 
 import asyncio
@@ -9,9 +12,12 @@ import os
 import signal
 import sys
 import time
+import types
 from collections.abc import Callable
+from logging import Logger
 from typing import Any
 
+from graphiti_core import Graphiti
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table, box
@@ -46,7 +52,9 @@ class ShutdownManager:
         # Set up custom exception handling
         sys.excepthook = self._custom_excepthook
 
-    def _custom_excepthook(self, exc_type, exc_value, exc_traceback) -> None:
+    def _custom_excepthook(
+        self, exc_type: type[BaseException], exc_value: BaseException, exc_traceback: types.TracebackType | None
+    ) -> None:
         """Custom excepthook for handling shutdown exceptions.
 
         Args:
@@ -101,11 +109,11 @@ class ShutdownManager:
 
     async def graceful_shutdown(
         self,
-        queue_manager: Any,
-        queue_progress_display: Any,
-        graphiti_client: Any,
-        logger: Any,
-        display_manager: Any | None = None,
+        queue_manager: QueueManager,
+        queue_progress_display: QueueProgressDisplay,
+        graphiti_client: Graphiti,
+        logger: Logger,
+        display_manager: DisplayManager | None = None,
         timeout: float = 5.0,
     ) -> None:
         """Perform graceful shutdown of the MCP server and all resources.
@@ -167,7 +175,7 @@ class ShutdownManager:
 
             # 2. Close Neo4j connection if client exists
             neo4j_success = True
-            if graphiti_client is not None:
+            if graphiti_client and hasattr(graphiti_client, "driver"):
                 try:
                     await graphiti_client.driver.close()
                     logger.info("[success]Neo4j connection closed successfully[/success]")
@@ -184,7 +192,7 @@ class ShutdownManager:
 
             # 3. Cancel all remaining tasks except the current one
             current_task = asyncio.current_task()
-            remaining_tasks = []
+            remaining_tasks: list[asyncio.Task[Any]] = []
             for task in [t for t in asyncio.all_tasks() if t is not current_task]:
                 if task.get_name() != "shutdown_task":
                     task.cancel()
@@ -239,7 +247,9 @@ class ShutdownManager:
         # Exit the process immediately
         sys.exit(0)
 
-    def force_kill(self, queue_progress_display: Any, display_manager: Any | None = None) -> None:
+    def force_kill(
+        self, queue_progress_display: QueueProgressDisplay, display_manager: DisplayManager | None = None
+    ) -> None:
         """Force kill the process immediately without cleanup.
 
         Args:
@@ -285,11 +295,11 @@ class ShutdownManager:
 
     def setup_signal_handlers(
         self,
-        queue_manager: Any,
-        queue_progress_display: Any,
-        graphiti_client: Any,
-        logger: Any,
-        display_manager: Any | None = None,
+        queue_manager: QueueManager,
+        queue_progress_display: QueueProgressDisplay,
+        graphiti_client: Graphiti,
+        logger: Logger,
+        display_manager: DisplayManager | None = None,
     ) -> None:
         """Set up signal handlers for shutdown.
 
@@ -303,13 +313,13 @@ class ShutdownManager:
         loop = asyncio.get_running_loop()
 
         # Define handlers
-        def graceful_handler():
+        def graceful_handler() -> Callable[[], asyncio.Task[None]]:
             return lambda: asyncio.create_task(
                 self.graceful_shutdown(queue_manager, queue_progress_display, graphiti_client, logger, display_manager),
                 name="shutdown_task",
             )
 
-        def force_handler():
+        def force_handler() -> Callable[[], None]:
             return lambda: self.force_kill(queue_progress_display, display_manager)
 
         # Register signal handlers
@@ -337,11 +347,11 @@ class ShutdownManager:
 
     def _create_sigterm_handler(
         self,
-        queue_manager: Any,
-        queue_progress_display: Any,
-        graphiti_client: Any,
-        logger: Any,
-        display_manager: Any | None = None,
+        queue_manager: QueueManager,
+        queue_progress_display: QueueProgressDisplay,
+        graphiti_client: Graphiti,
+        logger: Logger,
+        display_manager: DisplayManager | None = None,
     ) -> Callable[[int, Any], None]:
         """Create a SIGTERM handler for graceful shutdown.
 
@@ -356,7 +366,7 @@ class ShutdownManager:
             Signal handler function
         """
 
-        def handler(signum: int, frame: Any) -> None:
+        def handler(signum: int, frame: types.FrameType) -> None:
             """Handle SIGTERM by initiating graceful shutdown."""
             self.set_graceful()
             print("\nSIGTERM received. Initiating graceful shutdown...")

@@ -5,7 +5,7 @@ from memcp.console.queue_display import QueueProgressDisplay
 from memcp.utils.memcp_rich_theme import GRAPHITI_THEME
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import NoReturn
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -164,7 +164,7 @@ class DisplayManager:
         self,
         queue_progress_display: QueueProgressDisplay,
         status_obj: Status,
-        run_coroutine: Callable[[], Awaitable[Any]],
+        run_coroutine: Callable[[], Awaitable[NoReturn]],
     ) -> None:
         """Run a coroutine with a live display.
 

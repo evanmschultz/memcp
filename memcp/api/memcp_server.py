@@ -10,6 +10,7 @@ from memcp.utils.shutdown import ShutdownManager
 import asyncio
 import os
 from logging import Logger
+from typing import NoReturn
 
 from graphiti_core import Graphiti
 from graphiti_core.llm_client import LLMClient
@@ -128,7 +129,7 @@ class MemCPServer:
 
         self.logger.info("MCP server initialized and tools registered successfully")
 
-    async def _run_mcp_server(self) -> None:
+    async def _run_mcp_server(self) -> NoReturn:
         """Run the MCP server with the specified transport."""
         if not self.mcp:
             raise ValueError("MCP not initialized. Call initialize_mcp first.")
@@ -142,7 +143,7 @@ class MemCPServer:
 
     async def run(self) -> None:
         """Run the server."""
-        if not self.mcp or not self.graphiti_client or not self.queue_manager:
+        if not self.mcp or not self.graphiti_client or not self.queue_manager or not self.queue_progress_display:
             raise ValueError("Server not properly initialized. Call initialize methods first.")
 
         # Set up signal handlers
