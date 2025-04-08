@@ -3,9 +3,9 @@
 # TODO: add customizable config path logic
 # TODO: find a less hacky way to handle default values from config files and not need to pass each arg in the cli
 
+from memcp.config.config_errors import MissingCredentialsError
 from memcp.config.sources import DEFAULT_CONFIG_PATH, TomlConfigSettingsSource
-from memcp.templates.instructions.mcp_instructions import GraphitiInstructions
-from memcp.utils.errors import MissingCredentialsError
+from memcp.templates import GraphitiInstructions
 
 import logging
 from typing import Literal

@@ -3,11 +3,11 @@
 
 from memcp.api.memcp_server import MemCPServer
 from memcp.config import MemCPConfig, MissingCredentialsError
+from memcp.config.config_errors import ConfigError
 from memcp.console import DisplayManager, QueueProgressDisplay
-from memcp.core.queue import QueueManager, QueueStatsTracker
 from memcp.llm.llm_factory import LLMClientFactory
+from memcp.queue import QueueManager, QueueStatsTracker
 from memcp.utils import configure_logging, get_logger
-from memcp.utils.errors import ConfigError
 from memcp.utils.shutdown import ShutdownManager
 
 import asyncio
@@ -47,11 +47,9 @@ async def create_server(config: MemCPConfig) -> MemCPServer:
         Configured MemCP server
     """
     try:
-        # Create display manager
         shutdown_manager = ShutdownManager()
         display_manager = DisplayManager()
 
-        # Create the server
         server = MemCPServer(
             config=config,
             display_manager=display_manager,
@@ -59,7 +57,6 @@ async def create_server(config: MemCPConfig) -> MemCPServer:
             logger=logger,
         )
 
-        # Initialize queue components
         queue_stats_tracker = QueueStatsTracker()
         queue_manager = QueueManager(queue_stats_tracker)
         queue_progress_display = QueueProgressDisplay(
@@ -72,16 +69,12 @@ async def create_server(config: MemCPConfig) -> MemCPServer:
             queue_progress_display=queue_progress_display,
         )
 
-        # Create LLM client
         llm_client = LLMClientFactory.create_openai_client(
             api_key=config.openai.api_key.get_secret_value(),
             model=config.openai.model_name,
         )
 
-        # Initialize Graphiti
         await server.initialize_graphiti(llm_client, config.destroy_graph)
-
-        # Initialize MCP
         server.initialize_mcp()
 
         return server

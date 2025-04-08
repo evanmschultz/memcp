@@ -1,6 +1,6 @@
 """Queue progress display functionality for Graphiti MCP Server."""
 
-from memcp.core.queue.stats import QueueStatsTracker
+from memcp.queue.stats import QueueStatsTracker
 
 from rich.console import Console
 from rich.panel import Panel

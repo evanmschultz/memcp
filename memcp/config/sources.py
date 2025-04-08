@@ -1,6 +1,6 @@
 """Settings source for loading configuration values from a TOML file."""
 
-from memcp.utils.errors import ConfigMissingError
+from memcp.config.config_errors import ConfigMissingError
 
 from pathlib import Path
 from typing import Any

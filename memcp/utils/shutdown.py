@@ -2,7 +2,7 @@
 
 from memcp.console.display_manager import DisplayManager
 from memcp.console.queue_display import QueueProgressDisplay
-from memcp.core.queue import QueueManager
+from memcp.queue import QueueManager
 from memcp.utils.memcp_rich_theme import GRAPHITI_THEME
 
 import asyncio

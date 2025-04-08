@@ -1,6 +1,6 @@
 """Queue management functionality for Graphiti MCP Server."""
 
-from memcp.core.queue.stats import QueueStatsTracker
+from memcp.queue.stats import QueueStatsTracker
 
 import asyncio
 import logging

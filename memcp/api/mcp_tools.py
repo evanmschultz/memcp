@@ -1,7 +1,7 @@
 """MCP tools for Graphiti Server."""
 
+from memcp.api.api_errors import EpisodeError
 from memcp.config.settings import MemCPConfig
-from memcp.core.queue import QueueManager
 from memcp.memcp_typings import MEMCP_ENTITIES
 from memcp.models.responses import (
     EpisodeSearchResponse,
@@ -12,6 +12,7 @@ from memcp.models.responses import (
     StatusResponse,
     SuccessResponse,
 )
+from memcp.queue import QueueError, QueueManager, QueueProcessingError
 from memcp.utils import get_logger
 
 from datetime import datetime, timezone
@@ -148,9 +149,13 @@ class MCPToolsRegistry:
                         f"[danger]Error[/danger] processing episode '[highlight]{name}[/highlight]' for graph_id "
                         f"[highlight]{graph_id_str}[/highlight]: [danger]{error_msg}[/danger]"
                     )
+                    raise QueueProcessingError(f"Error processing episode: {error_msg}") from e
 
             # Enqueue the task for processing
-            await self.queue_manager.enqueue_task(graph_id_str, process_episode)
+            try:
+                await self.queue_manager.enqueue_task(graph_id_str, process_episode)
+            except QueueError as e:
+                return {"error": f"Error queuing episode task: {str(e)}"}
 
             # Return immediately with a success message
             # Use the queue size from the queue manager's queue for this group_id
@@ -165,7 +170,9 @@ class MCPToolsRegistry:
         except Exception as e:
             error_msg = str(e)
             logger.error(f"[danger]Error queuing episode task[/danger]: {error_msg}")
-            return {"error": f"Error queuing episode task: {error_msg}"}
+            if isinstance(e, QueueError):
+                raise
+            raise EpisodeError(f"Error queuing episode task: {error_msg}") from e
 
     async def search_nodes(
         self,
@@ -309,13 +316,19 @@ class MCPToolsRegistry:
         try:
             # Get the episodic node by UUID
             episodic_node = await EpisodicNode.get_by_uuid(self.graphiti_client.driver, uuid)
+            if not episodic_node:
+                raise EpisodeError(f"Episode with UUID {uuid} not found")
+
             # Delete the node using its delete method
             await episodic_node.delete(self.graphiti_client.driver)
             return {"message": f"Episode with UUID {uuid} deleted successfully"}
+        except EpisodeError as e:
+            logger.error(f"Error deleting episode: {str(e)}")
+            return {"error": str(e)}
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Error deleting episode: {error_msg}")
-            return {"error": f"Error deleting episode: {error_msg}"}
+            raise EpisodeError(f"Error deleting episode: {error_msg}") from e
 
     async def get_entity_edge(self, uuid: str) -> dict[str, Any] | ErrorResponse:
         """Get an entity edge from the Graphiti knowledge graph by its UUID.

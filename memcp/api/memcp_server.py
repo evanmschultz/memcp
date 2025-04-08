@@ -1,10 +1,11 @@
 """Graphiti MCP Server implementation."""
 
+from memcp.api.api_errors import ServerInitializationError, UnsupportedTransportError
 from memcp.api.mcp_tools import MCPToolsRegistry, register_tools
 from memcp.config.settings import MemCPConfig
 from memcp.console.display_manager import DisplayManager
 from memcp.console.queue_display import QueueProgressDisplay
-from memcp.core.queue import QueueManager, QueueStatsTracker
+from memcp.queue import QueueManager, QueueStatsTracker
 from memcp.utils.shutdown import ShutdownManager
 
 import asyncio
@@ -115,7 +116,7 @@ class MemCPServer:
 
         # Make sure we have necessary components initialized
         if not self.graphiti_client or not self.queue_manager:
-            raise ValueError("GraphitiServer not fully initialized. Call initialize methods first.")
+            raise ServerInitializationError("GraphitiServer not fully initialized. Call initialize methods first.")
 
         # Create the tools registry
         self.tools_registry = MCPToolsRegistry(
@@ -132,14 +133,14 @@ class MemCPServer:
     async def _run_mcp_server(self) -> NoReturn:
         """Run the MCP server with the specified transport."""
         if not self.mcp:
-            raise ValueError("MCP not initialized. Call initialize_mcp first.")
+            raise ServerInitializationError("MCP not initialized. Call initialize_mcp first.")
 
         if self.config.server.transport == "stdio":
             await self.mcp.run_stdio_async()
         elif self.config.server.transport == "sse":
             await self.mcp.run_sse_async()
         else:
-            raise ValueError(f"Unsupported transport: {self.config.server.transport}")
+            raise UnsupportedTransportError(f"Unsupported transport: {self.config.server.transport}")
 
     async def run(self) -> None:
         """Run the server."""
