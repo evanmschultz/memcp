@@ -11,8 +11,8 @@ from memcp.utils.shutdown import ShutdownManager
 import asyncio
 import os
 from logging import Logger
-from typing import NoReturn
 
+# from typing import NoReturn
 from graphiti_core import Graphiti
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
@@ -130,7 +130,7 @@ class MemCPServer:
 
         self.logger.info("MCP server initialized and tools registered successfully")
 
-    async def _run_mcp_server(self) -> NoReturn:
+    async def _run_mcp_server(self) -> None:
         """Run the MCP server with the specified transport."""
         if not self.mcp:
             raise ServerInitializationError("MCP not initialized. Call initialize_mcp first.")
@@ -183,7 +183,7 @@ class MemCPServer:
             await self.display_manager.run_with_live_display(
                 self.queue_progress_display,
                 status_obj,
-                lambda: self._run_mcp_server(),  # Fixed: No arguments passed here
+                lambda: self._run_mcp_server(),
             )
 
         except asyncio.CancelledError:
