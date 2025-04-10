@@ -2,7 +2,7 @@
 
 from memcp.api.api_errors import ServerInitializationError, UnsupportedTransportError
 from memcp.api.mcp_tools import MCPToolsRegistry, register_tools
-from memcp.config.settings import MemCPConfig
+from memcp.config.memcp_config import MemCPConfig
 from memcp.console.display_manager import DisplayManager
 from memcp.console.queue_display import QueueProgressDisplay
 from memcp.queue import QueueManager, QueueStatsTracker

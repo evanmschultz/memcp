@@ -3,7 +3,7 @@
 
 from memcp.api.memcp_server import MemCPServer
 from memcp.config import MemCPConfig, MemCPConfigBuilder, MissingCredentialsError
-from memcp.config.config_errors import ConfigError
+from memcp.config.errors import ConfigError
 from memcp.console import DisplayManager, QueueProgressDisplay
 from memcp.llm.llm_factory import LLMClientFactory
 from memcp.queue import QueueManager, QueueStatsTracker
