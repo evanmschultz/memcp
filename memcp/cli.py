@@ -2,7 +2,7 @@
 """Command-line interface for MemCP."""
 
 from memcp.api.memcp_server import MemCPServer
-from memcp.config import MemCPConfig, MissingCredentialsError
+from memcp.config import MemCPConfig, MemCPConfigBuilder, MissingCredentialsError
 from memcp.config.config_errors import ConfigError
 from memcp.console import DisplayManager, QueueProgressDisplay
 from memcp.llm.llm_factory import LLMClientFactory
@@ -23,6 +23,7 @@ from rich.panel import Panel
 found_dotenv = find_dotenv(usecwd=True)
 if found_dotenv:
     load_dotenv(found_dotenv)
+    print(f"Found .env file at: {found_dotenv}")
 else:
     # Try app directory
     app_dir = Path(__file__).parent.parent
@@ -69,10 +70,8 @@ async def create_server(config: MemCPConfig) -> MemCPServer:
             queue_progress_display=queue_progress_display,
         )
 
-        llm_client = LLMClientFactory.create_openai_client(
-            api_key=config.openai.api_key.get_secret_value(),
-            model=config.openai.model_name,
-        )
+        llm_factory = LLMClientFactory(config=config)
+        llm_client = llm_factory.create_client()
 
         await server.initialize_graphiti(llm_client, config.destroy_graph)
         server.initialize_mcp()
@@ -119,10 +118,11 @@ def main() -> None:
     """Main entry point for the MemCP CLI."""
     try:
         # Use CliApp to get configuration
-        config = CliApp.run(MemCPConfig)
+        cli_return = CliApp.run(MemCPConfigBuilder)
+        memcp_config = cli_return.to_memcp_config()
 
         # Run the server with the configuration
-        asyncio.run(run_server(config))
+        asyncio.run(run_server(memcp_config))
     except Exception as e:
         # Handle any unexpected errors during startup
         console = Console()

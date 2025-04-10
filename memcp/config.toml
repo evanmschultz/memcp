@@ -8,11 +8,26 @@
     user = "neo4j"
     # DO NOT set password here - use environment variables!
 
-[openai]
-    # DO NOT set api_key here - use environment variables!
-    # Optional, set if using a custom OpenAI endpoint
-    # base_url = "https://api.example.com"  
-    model_name = "gpt-4o-mini"
+[llm]
+    # Provider for completions (only openai or anthropic are currently supported)
+    # model_name = "claude-3-7-sonnet-20250219"
+    provider = "anthropic"
+    # model_name = "gpt-4o-mini"
+    # provider   = "openai"
+    # Optional, set if using custom endpoints
+    # base_url = "https://api.example.com"
+    # Generation settings
+    max_tokens  = 2000
+    temperature = 0
+    # Note: Do not set api_key here - use environment variables!
+
+[embeddings]
+    # Currently only OpenAI supported for embeddings
+    model_name = "text-embedding-3-small"
+    provider   = "openai"
+    # Optional custom endpoint
+    # base_url = "https://api.example.com"
+    # Note: Do not set api_key here - use environment variables!
 
 [graph]
     # If not specified, a random ID will be generated

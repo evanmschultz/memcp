@@ -1,6 +1,6 @@
 """Display management utilities for MemCP."""
 
-from memcp.config.settings import ServerConfig
+from memcp.config import ServerConfig
 from memcp.console.queue_display import QueueProgressDisplay
 from memcp.utils.memcp_rich_theme import GRAPHITI_THEME
 

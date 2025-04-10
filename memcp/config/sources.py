@@ -11,7 +11,7 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 # TODO: Add a custom config path logic
 
 
-# Compute the default config path relative to this module's location
+# Compute the default config path relative to this module's location (custom config path not yet supported)
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.toml"
 
 

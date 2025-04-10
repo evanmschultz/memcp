@@ -20,6 +20,7 @@
     memcp = "memcp.cli:main"
 
 [project.optional-dependencies]
+    anthropic = ["graphiti-core[anthropic]"]
     dev = [
         "pyright>=1.1.350",
         "pytest-asyncio>=0.23.5",
@@ -115,3 +116,11 @@
 
 [tool.hatch.build.targets.wheel]
     packages = ["memcp"]
+
+[tool.uv.sources]
+memcp = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "memcp[anthropic,dev]",
+]

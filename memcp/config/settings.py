@@ -8,9 +8,15 @@ from memcp.config.sources import DEFAULT_CONFIG_PATH, TomlConfigSettingsSource
 from memcp.templates import GraphitiInstructions
 
 import logging
-from typing import Literal
+from typing import Literal, cast
 
-from pydantic import Field, SecretStr, model_validator
+import graphiti_core.llm_client.config
+from graphiti_core.embedder.client import EMBEDDING_DIM
+from graphiti_core.embedder.openai import DEFAULT_EMBEDDING_MODEL as DEFAULT_OPENAI_EMBEDDING_MODEL
+from graphiti_core.embedder.openai import OpenAIEmbedderConfig
+from graphiti_core.llm_client.config import DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE
+from graphiti_core.llm_client.openai_client import DEFAULT_MODEL as DEFAULT_OPENAI_MODEL
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, CliSuppress, PydanticBaseSettingsSource, SettingsConfigDict
 from typing_extensions import Self
 
@@ -18,7 +24,60 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
-class Neo4jConfig(BaseSettings):
+def is_anthropic_available() -> bool:
+    """Check if anthropic is available.
+
+    Used to confirm that the Anthropic extension to MemCP is installed before allowing Anthropic usage.
+    """
+    try:
+        import anthropic  # type: ignore # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def get_model_name(provider: Literal["openai", "anthropic"]) -> str:
+    """Get the model name for the current provider.
+
+    Returns:
+        str: The model name.
+    """
+    if is_anthropic_available() and provider == "anthropic":
+        from graphiti_core.llm_client.anthropic_client import DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL
+
+        return ANTHROPIC_DEFAULT_MODEL
+    elif provider == "openai":
+        return DEFAULT_OPENAI_MODEL
+    else:
+        raise ValueError(f"Invalid provider: {provider}")
+
+
+def get_model_name_description() -> str:
+    """Get the model name description for the current provider.
+
+    Conditionally defines the model name description based on the availability of the anthropic provider.
+
+    Returns:
+        str: The model name description.
+    """
+    description = f"Model name to use for completions. Defaults to {DEFAULT_OPENAI_MODEL} for OpenAI."
+    if is_anthropic_available():
+        from graphiti_core.llm_client.anthropic_client import DEFAULT_MODEL as ANTHROPIC_DEFAULT_MODEL
+
+        description += f" Defaults to {ANTHROPIC_DEFAULT_MODEL} for Anthropic."
+    return description
+
+
+class Neo4jConfig(BaseModel):
+    """Neo4j database connection configuration."""
+
+    uri: str
+    user: str
+    password: SecretStr
+
+
+class Neo4jConfigBuilder(BaseSettings):
     """Neo4j database connection configuration."""
 
     model_config = SettingsConfigDict(
@@ -30,21 +89,217 @@ class Neo4jConfig(BaseSettings):
     user: str = Field(None, description="Neo4j user. Config defaults to 'neo4j'.")  # type: ignore
     password: CliSuppress[SecretStr] = Field(..., description="Neo4j password", exclude=True)
 
+    @model_validator(mode="after")
+    def validate_credentials(self) -> Self:
+        """Validate that required credentials are provided."""
+        # Validate Neo4j password exists
+        if not self.password:
+            raise MissingCredentialsError("NEO4J_PASSWORD environment variable is not set.")
 
-class OpenAIConfig(BaseSettings):
-    """OpenAI API settings."""
+        return self
+
+    def to_neo4j_config(self) -> Neo4jConfig:
+        """Convert to graphiti-core Neo4jConfig."""
+        password = SecretStr(self.password.get_secret_value())
+        return Neo4jConfig(
+            uri=self.uri,
+            user=self.user,
+            password=password,
+        )
+
+
+class EmbeddingsConfig(BaseModel):
+    """Embeddings provider configuration."""
+
+    embeddings_provider: Literal["openai"]
+    api_key: SecretStr
+    embeddings_model_name: str
+    embeddings_dim: int
+    embeddings_base_url: str | None
+
+    def to_graphiti_embeddings_config(self) -> OpenAIEmbedderConfig:
+        """Convert to graphiti-core LLMConfig for embeddings."""
+        return OpenAIEmbedderConfig(
+            api_key=self.api_key.get_secret_value(),
+            embedding_model=self.embeddings_model_name,
+            embedding_dim=self.embeddings_dim,
+            base_url=self.embeddings_base_url,
+        )
+
+
+class EmbeddingsConfigBuilder(BaseSettings):
+    """Embeddings provider configuration.
+
+    Notes:
+        - Currently only OpenAI is supported due to graphiti-core limitations.
+    """
+
+    model_config = SettingsConfigDict(
+        case_sensitive=False,
+        env_prefix="OPENAI_",
+        extra="allow",
+    )
+
+    embeddings_provider: CliSuppress[Literal["openai"]] = Field(
+        "openai", description="LLM provider to use for embeddings (currently only OpenAI supported)"
+    )
+    api_key: CliSuppress[SecretStr] = Field(..., description="API key for the embeddings provider")
+    embeddings_model_name: CliSuppress[str] = Field(
+        DEFAULT_OPENAI_EMBEDDING_MODEL,
+        description="Model name to use for embeddings. Defaults to provider-specific default.",
+    )
+    embeddings_dim: CliSuppress[int] = Field(
+        EMBEDDING_DIM, description="Dimension of the embeddings. Defaults to provider-specific default."
+    )
+    embeddings_base_url: CliSuppress[str | None] = Field(None, description="Base URL for the embeddings API")
+
+    @model_validator(mode="after")
+    def validate_credentials(self) -> Self:
+        """Validate that required credentials are provided."""
+        if not self.api_key:
+            raise MissingCredentialsError(
+                f"{self.embeddings_provider.upper()}_API_KEY environment variable is not set for embeddings."
+            )
+        return self
+
+    def to_embeddings_config(self) -> EmbeddingsConfig:
+        """Convert to graphiti-core EmbeddingsConfig."""
+        return EmbeddingsConfig(
+            embeddings_provider=self.embeddings_provider,
+            api_key=self.api_key,
+            embeddings_model_name=self.embeddings_model_name,
+            embeddings_dim=self.embeddings_dim,
+            embeddings_base_url=self.embeddings_base_url,
+        )
+
+
+class AnthropicConfigBuilder(BaseSettings):
+    """Anthropic configuration."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="ANTHROPIC_",
+        case_sensitive=False,
+    )
+
+    api_key: CliSuppress[SecretStr | None] = Field(None, description="API key for the anthropic provider")
+
+
+class OpenAIConfigBuilder(BaseSettings):
+    """OpenAI configuration."""
 
     model_config = SettingsConfigDict(
         env_prefix="OPENAI_",
         case_sensitive=False,
     )
 
-    api_key: CliSuppress[SecretStr] = Field(..., description="OpenAI API key", exclude=True)
-    model_name: str = Field(None, description="OpenAI model name. Config defaults to 'gpt-4o-mini'.")  # type: ignore
-    base_url: str | None = Field(None, description="OpenAI API base URL")
+    api_key: CliSuppress[SecretStr] = Field(..., description="API key for the openai provider")
 
 
-class GraphConfig(BaseSettings):
+class LLMProviderConfig(BaseModel):
+    """LLM provider configuration."""
+
+    provider: Literal["openai", "anthropic"]
+    api_key: SecretStr
+    model_name: str
+    base_url: str | None
+    temperature: float
+    max_tokens: int
+
+    def to_graphiti_llm_config(self) -> graphiti_core.llm_client.config.LLMConfig:
+        """Convert to graphiti-core LLMConfig."""
+        return graphiti_core.llm_client.LLMConfig(
+            api_key=self.api_key.get_secret_value(),
+            model=self.model_name,
+            base_url=self.base_url,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+
+
+class LLMProviderConfigBuilder(BaseSettings):
+    """Base configuration for LLM providers."""
+
+    model_config = SettingsConfigDict(
+        case_sensitive=False,
+    )
+
+    provider: Literal["openai", "anthropic"] = Field(
+        "openai",  # Default to OpenAI
+        description="LLM provider to use for completions (openai or anthropic)",
+    )
+
+    openai_config: CliSuppress[OpenAIConfigBuilder] = Field(default_factory=OpenAIConfigBuilder)  # type: ignore
+    anthropic_config: CliSuppress[AnthropicConfigBuilder] = Field(default_factory=AnthropicConfigBuilder)  # type: ignore
+    api_key: CliSuppress[SecretStr | None] = Field(None, description="API key for the completion provider")
+
+    model_name: str | None = Field(
+        None,
+        description=get_model_name_description(),
+    )
+
+    base_url: CliSuppress[str | None] = Field(None, description="Base URL for the completion API")
+
+    temperature: CliSuppress[float] = Field(DEFAULT_TEMPERATURE, description="Temperature for generation")
+    max_tokens: CliSuppress[int] = Field(DEFAULT_MAX_TOKENS, description="Maximum tokens to generate")
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_env_prefix(cls, data: dict[str, str]) -> dict[str, str]:
+        """Set the environment prefix based on the provider."""
+        provider = data.get("provider", "openai")
+        cls.model_config["env_prefix"] = f"{provider.upper()}_"
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_provider(cls, data: dict[str, str]) -> dict[str, str]:
+        """Validate that the provider is available."""
+        provider = data.get("provider", "openai")
+        if provider == "anthropic" and not is_anthropic_available():
+            raise ImportError(
+                'The anthropic extra is required for Anthropic support. Install it with: uv add "memcp\\[anthropic]"'
+            )
+        return data
+
+    @model_validator(mode="after")
+    def validate_credentials(self) -> Self:
+        """Validate that required credentials are provided."""
+        if self.provider == "openai":
+            if not self.openai_config.api_key:
+                raise MissingCredentialsError("OPENAI_API_KEY environment variable is not set for llm provider.")
+
+            self.api_key = self.openai_config.api_key
+        elif self.provider == "anthropic":
+            if not self.anthropic_config.api_key:
+                raise MissingCredentialsError("ANTHROPIC_API_KEY environment variable is not set for llm provider.")
+
+            self.api_key = self.anthropic_config.api_key
+        return self
+
+    def to_llm_provider_config(self) -> LLMProviderConfig:
+        """Convert to graphiti-core LLMProviderConfig."""
+        api_key = cast(SecretStr, self.api_key)
+        if not self.model_name:
+            self.model_name = get_model_name(self.provider)
+
+        return LLMProviderConfig(
+            provider=self.provider,
+            api_key=api_key,
+            model_name=self.model_name,
+            base_url=self.base_url,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+
+
+class GraphConfig(BaseModel):
+    """Graph configuration."""
+
+    id: str | None
+    use_memcp_entities: bool
+
+
+class GraphConfigBuilder(BaseSettings):
     """Graph configuration settings."""
 
     model_config = SettingsConfigDict(
@@ -61,8 +316,23 @@ class GraphConfig(BaseSettings):
         "Config defaults to 'False'.",
     )  # type: ignore
 
+    def to_graph_config(self) -> GraphConfig:
+        """Convert to graphiti-core GraphConfig."""
+        return GraphConfig(
+            id=self.id,
+            use_memcp_entities=self.use_memcp_entities,
+        )
 
-class ServerConfig(BaseSettings):
+
+class ServerConfig(BaseModel):
+    """Server configuration."""
+
+    transport: Literal["sse", "stdio"]
+    host: str
+    port: int
+
+
+class ServerConfigBuilder(BaseSettings):
     """Server configuration settings."""
 
     transport: Literal["sse", "stdio"] = Field(
@@ -71,9 +341,28 @@ class ServerConfig(BaseSettings):
     host: str = Field(None, description="Host address for the server. Config defaults to '127.0.0.1'.")  # type: ignore
     port: int = Field(None, description="Port number for the server. Config defaults to '8000'.")  # type: ignore
 
+    def to_server_config(self) -> ServerConfig:
+        """Convert to graphiti-core ServerConfig."""
+        return ServerConfig(
+            transport=self.transport,
+            host=self.host,
+            port=self.port,
+        )
 
-class MCPConfig(BaseSettings):
+
+class MCPConfig(BaseModel):
+    """MCP server configuration."""
+
+    name: str | None
+    instructions: str
+
+
+class MCPConfigBuilder(BaseSettings):
     """MCP server configuration settings."""
+
+    model_config = SettingsConfigDict(
+        extra="allow",
+    )
 
     name: str | None = Field(
         None, description="Name of the MCP server to be used by the client. Config defaults to 'memcp'."
@@ -83,12 +372,27 @@ class MCPConfig(BaseSettings):
         description="Instructions for the MCP server",
     )
 
-    model_config = SettingsConfigDict(
-        extra="allow",
-    )
+    def to_mcp_config(self) -> MCPConfig:
+        """Convert to graphiti-core MCPConfig."""
+        return MCPConfig(
+            name=self.name,
+            instructions=self.instructions,
+        )
 
 
-class MemCPConfig(BaseSettings):
+class MemCPConfig(BaseModel):
+    """MemCP configuration."""
+
+    neo4j: Neo4jConfig
+    llm: LLMProviderConfig
+    graph: GraphConfig
+    server: ServerConfig
+    mcp: MCPConfig
+    destroy_graph: bool
+    embeddings: EmbeddingsConfig
+
+
+class MemCPConfigBuilder(BaseSettings):
     """Configuration for MemCP.
 
     Centralizes all configuration parameters for the MemCP server,
@@ -105,64 +409,17 @@ class MemCPConfig(BaseSettings):
         cli_implicit_flags=True,
         cli_use_class_docs_for_groups=True,
         toml_file=DEFAULT_CONFIG_PATH,
+        env_file=".env",
+        env_file_encoding="utf-8",
     )
 
-    # make the cofig path a Path object that validates the input string is a valid path object and the file exists
-    # config_path: Path = Field(
-    #     DEFAULT_CONFIG_PATH,
-    #     description="Path to TOML configuration file. Does not need the .toml extension.",
-    # )
-
-    # TODO: fix default factory based type errors and remove the `type: ignore`,
-    # code works but pyright complains
-    neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)  # type: ignore
-    openai: OpenAIConfig = Field(default_factory=OpenAIConfig)  # type: ignore
-    graph: GraphConfig = Field(default_factory=GraphConfig)  # type: ignore
-    server: ServerConfig = Field(default_factory=ServerConfig)  # type: ignore
-    mcp: MCPConfig = Field(default_factory=MCPConfig)  # type: ignore
+    neo4j: Neo4jConfigBuilder = Field(default_factory=Neo4jConfigBuilder)  # type: ignore
+    llm: LLMProviderConfigBuilder = Field(default_factory=LLMProviderConfigBuilder)  # type: ignore
+    graph: GraphConfigBuilder = Field(default_factory=GraphConfigBuilder)  # type: ignore
+    server: ServerConfigBuilder = Field(default_factory=ServerConfigBuilder)  # type: ignore
+    mcp: MCPConfigBuilder = Field(default_factory=MCPConfigBuilder)  # type: ignore
     destroy_graph: bool = Field(False, description="Destroy all graphs")
-
-    # @field_validator("config_path")
-    # @classmethod
-    # def validate_config_path(cls, v: Path | str) -> Path:
-    #     """Validate that the config file exists and is a valid path."""
-    #     # Convert to Path object
-    #     path = Path(v) if isinstance(v, str) else v
-
-    #     # Try exact path first
-    #     if path.exists() and path.is_file():
-    #         return path.resolve()
-
-    #     # If path doesn't exist and doesn't end with .toml, try with .toml
-    #     if not str(path).endswith(".toml"):
-    #         path_with_toml = Path(f"{path}.toml")
-    #         if path_with_toml.exists() and path_with_toml.is_file():
-    #             return path_with_toml.resolve()
-
-    #     # Neither path worked, provide helpful error
-    #     if not str(path).endswith(".toml"):
-    #         raise ValueError(f"Configuration file not found at either {path} or {path}.toml")
-    #     else:
-    #         raise ValueError(f"Configuration file not found at {path}")
-
-    @model_validator(mode="after")
-    def validate_credentials(self) -> Self:
-        """Validate that required credentials are provided."""
-        # Validate API key exists
-        if not self.openai.api_key:
-            raise MissingCredentialsError(
-                "OPENAI_API_KEY environment variable is not set. Please set this environment "
-                "variable with your OpenAI API key."
-            )
-
-        # Validate Neo4j password exists
-        if not self.neo4j.password:
-            raise MissingCredentialsError(
-                "NEO4J_PASSWORD environment variable is not set. Please set this environment "
-                "variable with your Neo4j password."
-            )
-
-        return self
+    embeddings: CliSuppress[EmbeddingsConfigBuilder] = Field(default_factory=EmbeddingsConfigBuilder)  # type: ignore
 
     @classmethod
     def settings_customise_sources(
@@ -174,13 +431,22 @@ class MemCPConfig(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Customise the sources for the settings."""
-        # Define the sources and their priority (earlier sources take precedence)
-        # The order is important here: CLI args (init_settings) overrides TOML config
-        print("Customizing settings sources with TOML file")
         return (
             init_settings,  # First priority - CLI arguments
             TomlConfigSettingsSource(settings_cls),  # Second priority - TOML config file
             env_settings,  # Third priority - Environment variables
             dotenv_settings,  # Fourth priority - .env file
             file_secret_settings,  # Fifth priority - Secrets
+        )
+
+    def to_memcp_config(self) -> MemCPConfig:
+        """Convert to graphiti-core MemCPConfig."""
+        return MemCPConfig(
+            neo4j=self.neo4j.to_neo4j_config(),
+            llm=self.llm.to_llm_provider_config(),
+            graph=self.graph.to_graph_config(),
+            server=self.server.to_server_config(),
+            mcp=self.mcp.to_mcp_config(),
+            destroy_graph=self.destroy_graph,
+            embeddings=self.embeddings.to_embeddings_config(),
         )

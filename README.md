@@ -1,4 +1,4 @@
-# MemCP - Memory for AI Agents
+<!-- # MemCP - Memory for AI Agents
 
 MemCP is a modular, extensible framework for AI agent memory based on the Model Context Protocol (MCP). It extends the Graphiti knowledge graph framework, allowing AI agents to build, maintain, and query a temporal knowledge graph of facts, entities, and relationships.
 
@@ -224,4 +224,19 @@ Contributions are welcome! Please see our [contributing guidelines](CONTRIBUTING
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. -->
+
+## Above is all outdated.
+
+## Optional Dependencies
+
+-   `anthropic`: Support for Anthropic's Claude models
+
+    ```bash
+    pip install your-package[anthropic]
+    ```
+
+-   `dev`: Development dependencies
+    ```bash
+    pip install -e ".[dev]"
+    ```
