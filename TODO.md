@@ -1,9 +1,21 @@
 # MemCP Refactoring TODO
 
--   [ ] Finish modularizing the code
+-   [ ] Research and add Tach to make methods private
 -   [ ] Add tests
--   [ ] Update to use config toml file
--   [ ] Fix `Server running on 0.0.0.0:8000` run on localhost or 127.0.0.1
--   [ ] Fix server running display styling and animation
--   [ ] Update prograss to be more granular and track more internal steps not just the initial tool calls
--   [ ] Make the progress stats async so the server always knows the progress
+-   [ ] Add docs
+-   [ ] Test docker build
+-   [ ] Replace cursor rules md
+-   [ ] Move memcp to new repo and create issues
+    -   [ ] Display duplication issues
+    -   [ ] General issue about project structure (pydantic as cli and config, where should it go?)
+    -   [ ] Failures don't stop server
+    -   [ ] Enhancement: queue tool that allows LLM to see if the last call to db finished before it creates a new one (status update call)
+    -   [ ] Customizable entities
+    -   [ ] Customizable templates
+    -   [ ] Customizable config path (for multiple projects, directories, etc.)
+    -   [ ] Uvicorn making it run on 0.0.0.0 and not localhost
+    -   [ ] More dependandable shutdown (shutdown manager have better cleanup by more consistently killing server wherever it is running regardless of whether or not the uvicorn issue was solved)
+-   [ ] Fix graphiti-core anthropic code
+-   [ ] Add thinking model abilities to graphiti-core
+-   [ ] Create issue and propose tach for private methods in graphiti-core
+-   [ ] Remove unused folders, files, etc. from memcp (zep_graphiti_issue, etc.)
