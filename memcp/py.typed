@@ -1,0 +1,1 @@
+"""This file marks the memcp package as fully typed, enabling type checkers to enforce typing."""

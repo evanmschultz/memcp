@@ -17,7 +17,7 @@
     version = "0.1.0"
 
 [project.scripts]
-    memcp = "memcp.cli:main"
+    memcp = "memcp.main:main"
 
 [project.optional-dependencies]
     anthropic = ["graphiti-core[anthropic]"]
@@ -118,9 +118,9 @@
     packages = ["memcp"]
 
 [tool.uv.sources]
-memcp = { workspace = true }
+    memcp = { workspace = true }
 
 [dependency-groups]
-dev = [
-    "memcp[anthropic,dev]",
-]
+    dev = [
+        "memcp[anthropic,dev]",
+    ]
