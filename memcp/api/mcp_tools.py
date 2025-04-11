@@ -2,7 +2,7 @@
 
 from memcp.api.api_errors import EpisodeError
 from memcp.config.memcp_config import MemCPConfig
-from memcp.memcp_typings import MEMCP_ENTITIES
+from memcp.models.entities import MEMCP_ENTITIES
 from memcp.models.responses import (
     EpisodeSearchResponse,
     ErrorResponse,

@@ -7,23 +7,22 @@ from memcp.utils import get_logger
 
 import sys
 
-from rich.console import Console
+import rich.console
 from rich.panel import Panel
 
 # Get a logger for this module
 logger = get_logger(__name__)
 
 
-async def run_server(config: MemCPConfig) -> None:
+async def run_server(config: MemCPConfig, console: rich.console.Console) -> None:
     """Create and run the MemCP server asynchronously.
 
     Args:
         config (MemCPConfig): The MemCP configuration object
+        console (rich.console.Console): The rich console object
     """
-    console = Console()
-
     try:
-        server = await create_server(config)
+        server = await create_server(config, console)
         await server.run()
     except MissingCredentialsError as e:
         console.print(

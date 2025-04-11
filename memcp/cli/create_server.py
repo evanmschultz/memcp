@@ -5,19 +5,21 @@ from memcp.config import MemCPConfig
 from memcp.config.errors import ConfigError
 from memcp.console import DisplayManager, QueueProgressDisplay
 from memcp.llm.llm_factory import LLMClientFactory
-from memcp.queue import QueueManager, QueueStatsTracker
+from memcp.queue import QueueManager, QueueStatsTracker, ShutdownManager
 from memcp.utils import get_logger
-from memcp.utils.shutdown import ShutdownManager
+
+import rich.console
 
 # Get a logger for this module
 logger = get_logger(__name__)
 
 
-async def create_server(config: MemCPConfig) -> MemCPServer:
+async def create_server(config: MemCPConfig, console: rich.console.Console) -> MemCPServer:
     """Create the MemCP server with all dependencies.
 
     Args:
         config (MemCPConfig): The MemCP configuration object
+        console (rich.console.Console): The rich console object
 
     Returns:
         Configured MemCP server

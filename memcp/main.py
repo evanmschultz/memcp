@@ -8,8 +8,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pydantic_settings
 from dotenv import find_dotenv, load_dotenv
-from pydantic_settings import CliApp
 from rich.console import Console
 
 # Load environment variables from multiple possible locations
@@ -29,20 +29,21 @@ configure_logging()
 
 # Get a logger for this module
 logger = get_logger(__name__)
+console = Console()
 
 
 def main() -> None:
     """Main entry point for the MemCP CLI."""
     try:
         # Use CliApp to get configuration
-        cli_return = CliApp.run(MemCPConfigBuilder)
+        cli_return = pydantic_settings.CliApp.run(MemCPConfigBuilder)
         memcp_config = cli_return.to_memcp_config()
 
         # Run the server with the configuration
-        asyncio.run(run_server(memcp_config))
+        asyncio.run(run_server(memcp_config, console))
     except Exception as e:
         # Handle any unexpected errors during startup
-        console = Console()
+
         console.print(f"[bold red]Error during startup:[/] {str(e)}")
         logger.error(f"Error during startup: {str(e)}")
         sys.exit(1)

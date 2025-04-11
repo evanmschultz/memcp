@@ -4,6 +4,9 @@ from memcp.config import ServerConfig
 from memcp.console.queue_display import QueueProgressDisplay
 from memcp.utils.memcp_rich_theme import GRAPHITI_THEME
 
+import asyncio
+import hashlib
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -34,6 +37,16 @@ class DisplayManager:
         # Store references to display components
         self.queue_progress_display: QueueProgressDisplay | None = None
         self.status_obj: Status | None = None
+
+        # Debounce-related attributes
+        self._last_update_time = 0
+        self._update_interval = 0.25  # seconds
+        self._update_pending = False
+        self._update_lock = asyncio.Lock()
+        self._pending_state = ""
+
+        # State tracking
+        self._last_visual_state = ""
 
     def get_main_console(self) -> Console:
         """Get the main console instance.
@@ -81,37 +94,114 @@ class DisplayManager:
                 spinner_style="green",
             )
 
-    def update_display(
-        self,
-        queue_progress_display: QueueProgressDisplay | None = None,
-        status_obj: Status | None = None,
-    ) -> None:
+    def _get_visual_state_hash(self) -> str:
+        """Generate a hash representing the current visual state.
+
+        Returns:
+            String hash of the current visual state
+        """
+        if not self.queue_progress_display:
+            return ""
+
+        # Get stats as a string representation for hashing
+        stats = self.queue_progress_display.stats_tracker.get_stats()
+        totals = self.queue_progress_display.stats_tracker.get_totals()
+
+        # Create a string representation of the state
+        state_repr = (
+            f"total:{totals['total']}-completed:{totals['completed']}-"
+            f"in_progress:{totals['in_progress']}-failed:{totals['failed']}"
+        )
+
+        # Hash the state string
+        return hashlib.md5(state_repr.encode()).hexdigest()
+
+    async def debounced_update(self) -> None:
+        """Update the display with throttling to prevent too many updates."""
+        async with self._update_lock:
+            current_time = time.time()
+
+            # Get current visual state
+            current_state = self._get_visual_state_hash()
+
+            # If state hasn't changed, don't update
+            if current_state == self._last_visual_state and current_state != "":
+                return
+
+            # Check if we're within the debounce interval
+            if current_time - self._last_update_time < self._update_interval:
+                # If already pending, don't schedule another update
+                if not self._update_pending:
+                    self._update_pending = True
+                    # Store the state that triggered this update
+                    self._pending_state = current_state
+                    asyncio.create_task(self._delayed_update())
+                return
+
+            # Update the last visual state
+            self._last_visual_state = current_state
+            self._last_update_time = current_time
+            self._update_pending = False
+            self.update_display()
+
+    def _render_queue_progress(self) -> bool:
+        """Render queue progress and return True if visual state changed.
+
+        Returns:
+            True if visual state changed, False otherwise
+        """
+        if not self.queue_progress_display:
+            return False
+
+        # Get the visual state before rendering
+        previous_state = self._last_visual_state
+
+        # Perform rendering
+        self.queue_progress_display.render()
+
+        # Get the new visual state
+        current_state = self._get_visual_state_hash()
+
+        # Update last visual state
+        self._last_visual_state = current_state
+
+        # Return whether the state changed
+        return previous_state != current_state
+
+    def update_display(self) -> None:
         """Update the display with current content.
 
         This method should be called whenever queue stats change.
-
-        Args:
-            queue_progress_display: Progress display to update (defaults to stored one)
-            status_obj: Status object to update (defaults to stored one)
         """
         if not self.live:
             return
 
-        # Use provided components or fall back to stored ones
-        progress_display = queue_progress_display or self.queue_progress_display
-        status = status_obj or self.status_obj
-
-        if not progress_display or not status:
+        # Use stored components
+        if not self.queue_progress_display or not self.status_obj:
             return
 
-        # Tell the progress display to render based on current stats
-        progress_display.render()
+        # Only create a new Group and update if the visual state changed
+        if self._render_queue_progress():
+            # Create a NEW Group with the updated panel and status
+            new_display_group = Group(self.queue_progress_display.get_renderable(), self.status_obj)
 
-        # Create a NEW Group with the updated panel and status
-        new_display_group = Group(progress_display.get_renderable(), status)
+            # Call live.update() with the new Group (with refresh=True)
+            self.live.update(new_display_group, refresh=True)
 
-        # Call live.update() with the new Group (with refresh=True)
-        self.live.update(new_display_group, refresh=True)
+    async def _delayed_update(self) -> None:
+        """Perform a delayed update after the debounce interval."""
+        await asyncio.sleep(self._update_interval)
+        async with self._update_lock:
+            if self._update_pending:
+                # Check if state has changed since we scheduled this update
+                current_state = self._get_visual_state_hash()
+                if current_state != self._last_visual_state:
+                    self._update_pending = False
+                    self._last_visual_state = current_state
+                    self._last_update_time = time.time()
+                    self.update_display()
+                else:
+                    self._update_pending = False
 
     def start_live_display(
         self,
@@ -130,6 +220,9 @@ class DisplayManager:
         # Store references to components
         self.queue_progress_display = queue_progress_display
         self.status_obj = status_obj
+
+        # Reset the visual state tracking
+        self._last_visual_state = ""
 
         # Ensure the progress display is rendered
         queue_progress_display.render()
@@ -165,6 +258,7 @@ class DisplayManager:
         queue_progress_display: QueueProgressDisplay,
         status_obj: Status,
         run_coroutine: Callable[[], Awaitable[Any]],
+        suppress_updates_for: float = 0.0,
     ) -> None:
         """Run a coroutine with a live display.
 
@@ -174,9 +268,14 @@ class DisplayManager:
             queue_progress_display: Progress display for queues (can be None)
             status_obj: Status object with server info
             run_coroutine: Coroutine to run while displaying the Live context
+            suppress_updates_for: Time in seconds to suppress updates after startup
         """
         # Start the live display
         self.start_live_display(queue_progress_display, status_obj)
+
+        # If we need to suppress updates, set the last update time to the future
+        if suppress_updates_for > 0:
+            self._last_update_time = time.time() + suppress_updates_for
 
         try:
             # Run the provided coroutine

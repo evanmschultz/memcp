@@ -4,9 +4,9 @@ from memcp.queue.stats import QueueStatsTracker
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
-from collections.abc import Callable as TypeCallable
 
 # Configure logger
 logger: logging.Logger = logging.getLogger(__name__)
@@ -30,9 +30,12 @@ class QueueManager:
         self.episode_queues: dict[str, asyncio.Queue[Callable[[], Awaitable[None]]]] = {}
         self.queue_workers: dict[str, bool] = {}
         self.queue_stats_tracker: QueueStatsTracker = queue_stats_tracker
-        self._state_change_callbacks: list[TypeCallable[[], None]] = []
+        self._state_change_callbacks: list[Callable[[], None]] = []
+        self._last_notification_time = 0
+        self._notification_interval = 0.1  # seconds
+        self._notification_pending = False
 
-    def add_state_change_callback(self, callback: TypeCallable[[], None]) -> None:
+    def add_state_change_callback(self, callback: Callable[[], None]) -> None:
         """Add a callback function to be called when queue state changes.
 
         This allows external components to be notified of state changes
@@ -44,7 +47,7 @@ class QueueManager:
         if callback not in self._state_change_callbacks:
             self._state_change_callbacks.append(callback)
 
-    def remove_state_change_callback(self, callback: TypeCallable[[], None]) -> None:
+    def remove_state_change_callback(self, callback: Callable[[], None]) -> None:
         """Remove a previously added callback function.
 
         Args:
@@ -54,9 +57,40 @@ class QueueManager:
             self._state_change_callbacks.remove(callback)
 
     def _notify_state_change(self) -> None:
-        """Notify all registered callbacks that state has changed."""
+        """Notify all registered callbacks that state has changed.
+
+        Includes throttling to prevent too many rapid notifications.
+        """
+        # Only proceed if there are callbacks registered
+        if not self._state_change_callbacks:
+            return
+
+        current_time = time.time()
+
+        # If we've notified recently, mark as pending but don't notify yet
+        if current_time - self._last_notification_time < self._notification_interval:
+            self._notification_pending = True
+            return
+
+        # Update notification time and reset pending flag
+        self._last_notification_time = current_time
+        self._notification_pending = False
+
+        # Call all registered callbacks
         for callback in self._state_change_callbacks:
             callback()
+
+    async def _check_pending_notification(self) -> None:
+        """Check if there's a pending notification after the throttle interval."""
+        await asyncio.sleep(self._notification_interval)
+        if self._notification_pending:
+            # Reset pending flag to prevent recursive scheduling
+            self._notification_pending = False
+            self._last_notification_time = time.time()
+
+            # Call all registered callbacks
+            for callback in self._state_change_callbacks:
+                callback()
 
     async def enqueue_task(self, group_id: str, process_func: Callable[[], Awaitable[None]]) -> None:
         """Enqueue a task for processing.

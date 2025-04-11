@@ -5,8 +5,8 @@ from memcp.api.mcp_tools import MCPToolsRegistry, register_tools
 from memcp.config.memcp_config import MemCPConfig
 from memcp.console.display_manager import DisplayManager
 from memcp.console.queue_display import QueueProgressDisplay
-from memcp.queue import QueueManager, QueueStatsTracker
-from memcp.utils.shutdown import ShutdownManager
+from memcp.queue import QueueManager, QueueStatsTracker, ShutdownManager
+from memcp.utils.uvicorn_config import get_uvicorn_config
 
 import asyncio
 import os
@@ -97,21 +97,25 @@ class MemCPServer:
         self.queue_progress_display = queue_progress_display
 
         # Add the display manager's update method as a callback
-        # This will be triggered whenever queue state changes
-        # Use a debounced callback to prevent too many updates
-        self.queue_manager.add_state_change_callback(
-            # Simple lambda that only calls update_display with the queue_progress_display
-            # We let the DisplayManager handle accessing the status object
-            lambda: self.display_manager.update_display()
-        )
+        # Use a wrapper function that doesn't return anything to fix type error
+        def update_callback() -> None:
+            asyncio.create_task(self.display_manager.debounced_update())
+
+        self.queue_manager.add_state_change_callback(update_callback)
 
     def initialize_mcp(self) -> None:
         """Initialize the MCP server instance."""
-        # Create the MCP server instance
+        # Get the Uvicorn settings with proper logging configuration
+        uvicorn_settings = get_uvicorn_config(
+            host=self.config.server.host,
+            port=self.config.server.port,
+        )
+
+        # Create the MCP server instance with custom settings
         self.mcp = FastMCP(
             self.config.mcp.name,
             instructions=self.config.mcp.instructions,
-            settings={"host": self.config.server.host, "port": self.config.server.port},
+            settings=uvicorn_settings,
         )
 
         # Make sure we have necessary components initialized
@@ -189,4 +193,6 @@ class MemCPServer:
 
         except asyncio.CancelledError:
             self.logger.info("[success]Server shutdown initiated - tasks being cancelled (this is normal)[/success]")
-            # Let the exception propagate for proper shutdown
+            # Don't re-raise the exception - let the graceful shutdown complete
+            # The ShutdownManager.graceful_shutdown method will handle this
+            return

@@ -11,7 +11,6 @@ import contextlib
 import os
 import signal
 import sys
-import time
 import types
 from collections.abc import Callable
 from logging import Logger
@@ -52,6 +51,9 @@ class ShutdownManager:
         # Set up custom exception handling
         sys.excepthook = self._custom_excepthook
 
+        # Track if we've already shown the final message
+        self._final_message_shown = False
+
     def _custom_excepthook(
         self, exc_type: type[BaseException], exc_value: BaseException, exc_traceback: types.TracebackType | None
     ) -> None:
@@ -62,23 +64,29 @@ class ShutdownManager:
             exc_value: Exception value
             exc_traceback: Exception traceback
         """
-        # First, call the original excepthook to show the traceback
-        self._original_excepthook(exc_type, exc_value, exc_traceback)
-
-        # If this is a shutdown-related exception, show our final message
+        # Don't show traceback for CancelledError during shutdown
         if self.in_progress and issubclass(exc_type, asyncio.CancelledError):
-            # Wait a moment to ensure traceback is fully printed
-            time.sleep(0.1)
-            self._show_final_message()
+            # Skip showing the traceback since we're in a controlled shutdown
+            return
+
+        # For other exceptions, use the original excepthook
+        self._original_excepthook(exc_type, exc_value, exc_traceback)
 
     def _show_final_message(self) -> None:
         """Display a final message after shutdown based on the shutdown mode."""
+        # Prevent duplicate messages
+        if self._final_message_shown:
+            return
+
+        self._final_message_shown = True
+
         print("\n\n" + "-" * 80)
         if self.mode == self.GRACEFUL:
             self.console.print("[bold green]✅ GRAPHITI SERVER SHUTDOWN SUCCESSFULLY[/bold green]\n")
-            self.console.print(
-                "\n[info]The asyncio CancelledError tracebacks above are normal and expected during shutdown.[/info]"
-            )
+            # Only mention tracebacks if we're not suppressing them
+            # self.console.print(
+            #     "\n[info]The asyncio CancelledError tracebacks above are normal and expected during shutdown.[/info]"
+            # )
             self.console.print(
                 "\n[info]All tasks were properly cancelled and resources were released cleanly.[/info]\n"
             )

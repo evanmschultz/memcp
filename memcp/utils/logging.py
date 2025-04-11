@@ -20,11 +20,17 @@ def configure_logging(level: int = logging.INFO) -> None:
     # Create console for rich output
     logging_console = Console(color_system="auto", theme=GRAPHITI_THEME)
 
-    # Install rich traceback handler
-    install_rich_traceback(console=logging_console, show_locals=False)
-    # # Configure logging with Rich to minimize noise and add colors
+    # Install rich traceback handler with custom suppress options
+    install_rich_traceback(
+        console=logging_console,
+        show_locals=False,
+        # Suppress specific modules from traceback to silence uvicorn/asyncio noise
+        suppress=["uvicorn", "asyncio", "anyio"],
+    )
+
+    # Configure logging with Rich to minimize noise and add colors
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(message)s",
         handlers=[
             RichHandler(
@@ -33,12 +39,33 @@ def configure_logging(level: int = logging.INFO) -> None:
                 tracebacks_show_locals=False,
                 markup=True,
                 show_time=False,
-                show_path=False,
-                enable_link_path=False,  # Disable clickable file paths
+                show_path=True,
                 highlighter=ReprHighlighter(),
+                # Suppress specific modules to hide their tracebacks
+                tracebacks_suppress=["uvicorn", "asyncio", "anyio"],
             )
         ],
     )
+
+    # Disable uvicorn loggers to prevent duplicate output
+    uvicorn_loggers = [
+        "uvicorn",
+        "uvicorn.error",
+        "uvicorn.access",
+        "uvicorn.asgi",
+    ]
+
+    for logger_name in uvicorn_loggers:
+        logger = logging.getLogger(logger_name)
+        logger.handlers = []  # Remove default handlers
+        logger.propagate = False  # Don't propagate to root logger
+        logger.disabled = True  # Disable the logger completely
+
+    # Also disable other loggers that might be noisy during normal operation
+    other_loggers = ["asyncio", "starlette.lifespan", "starlette.middleware"]
+    for logger_name in other_loggers:
+        logger = logging.getLogger(logger_name)
+        logger.setLevel(logging.ERROR)  # Only show error+ level messages
 
 
 # Create a function to get a logger
